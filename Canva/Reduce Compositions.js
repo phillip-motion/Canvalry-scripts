@@ -1,6 +1,7 @@
 // Delete Unused Compositions Script for Cavalry
 // ULTRA-FAST VERSION - Properly handles composition references
 
+
 function deleteUnusedCompositions() {
     // Auto-save the scene before cleanup
     console.log("Auto-saving scene before cleanup...");
@@ -114,3 +115,5 @@ function deleteUnusedCompositions() {
 
 // Run the script
 deleteUnusedCompositions();
+
+

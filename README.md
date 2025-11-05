@@ -39,5 +39,7 @@ Sets all image shaders to mipmaps in the current composition. Clean up those cru
 ## Check Update from Github
 Simple script to compare update versions against a json file and log a console alert.
 
+### Notes
+Some scripts make web API calls simply to check for updates. Please feel free to open pull requests and contribute! Licensed under the MIT license.
 
 Brought to you by the Canva Creative Team.

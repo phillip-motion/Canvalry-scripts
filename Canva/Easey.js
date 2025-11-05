@@ -76,7 +76,7 @@ ui.setTitle("Easey");
 //          }
 //      });
 
-var GITHUB_REPO = "phillip-motion/canvalry-scripts";
+var GITHUB_REPO = "phillip-motion/Canvalry-scripts";
 var scriptName = "Easey";  // Must match key your repo's versions.json
 var currentVersion = "1.0.0";
 
@@ -127,9 +127,9 @@ function checkForUpdate(githubRepo, scriptName, currentVersion, callback) {
     
     // Perform the version check
     try {
-        var url = "https://raw.githubusercontent.com/" + githubRepo + "/main/versions.json";
-        var client = new api.WebClient(url);
-        client.get("");
+        var path = "/" + githubRepo + "/main/versions.json";
+        var client = new api.WebClient("https://raw.githubusercontent.com");
+        client.get(path);
         
         if (client.status() === 200) {
             var versions = JSON.parse(client.body());
