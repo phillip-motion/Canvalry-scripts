@@ -1,11 +1,12 @@
-// Frame Rate Converter Plugin for Cavalry
+// Convert Frame Rate for Cavalry
 // Converts frame rate while maintaining visual timing of animations and easing curves
+// Developed with assistance from Cursor
 //
-// MAJOR BREAKTHROUGH: Proper bezier handle conversion for frame rate changes
+// Proper bezier handle conversion for frame rate changes
 // This script preserves the exact visual easing when converting between frame rates
 // by extracting cubic bezier values and reapplying them to new frame timing.
 //
-// KEY LEARNINGS INTEGRATED FROM EASEY DEVELOPMENT:
+// KEY LEARNINGS ABOUT CAVALRY EASING:
 // 1. Use api.modifyKeyframeTangent() for reliable bezier handle modification
 // 2. Get fresh keyframe IDs after moving keyframes (original IDs become invalid)
 // 3. Convert Cavalry bezier format ↔ cubic-bezier format for proper scaling
@@ -18,22 +19,7 @@ var activeComp = null;
 
 // Main execution function
 function main() {
-    // Get active composition and current frame rate
-    activeComp = api.getActiveComp();
-    if (!activeComp) {
-        console.log("Error: No active composition found");
-        return;
-    }
 
-    try {
-        currentFps = api.get(activeComp, "fps");
-        if (!currentFps || currentFps <= 0) {
-            currentFps = 25;
-        }
-    } catch(e) {
-        console.log("Could not get current FPS, using default 25");
-        currentFps = 25;
-    }
 
     // Create and show the UI
     createUI();
@@ -54,7 +40,7 @@ function createUI() {
     // Add text input field
     var hLayout1 = new ui.HLayout();
     var fpsInput = new ui.LineEdit();
-    fpsInput.setPlaceholder(currentFps.toString());
+    fpsInput.setPlaceholder("Enter new frame rate...");
     hLayout1.add(fpsInput);
     
     
@@ -62,16 +48,6 @@ function createUI() {
     var applyButton = new ui.Button("Apply");
 
     applyButton.onClick = function() {
-        // Refresh current FPS before each conversion
-        try {
-            currentFps = api.get(activeComp, "fps");
-            if (!currentFps || currentFps <= 0) {
-                currentFps = 25;
-            }
-        } catch(e) {
-            console.log("Could not get current FPS, using previous value: " + currentFps);
-        }
-        
         var newFpsString = fpsInput.getText().trim();
         
         // Validate input
@@ -86,15 +62,9 @@ function createUI() {
             return;
         }
         
-        if (newFps === currentFps) {
-            console.log("New frame rate is the same as current frame rate (" + currentFps + " fps). No conversion needed.");
-            return;
-        }
-        
-        console.log("Converting from " + currentFps + " fps to " + newFps + " fps");
         
         // Proceed with conversion
-        convertFrameRate(newFps, currentFps, activeComp);
+        convertFrameRate(newFps);
     };
     hLayout1.add(applyButton);
     ui.add(hLayout1);
@@ -114,7 +84,23 @@ function createUI() {
 main();
 
 // Main conversion function
-function convertFrameRate(targetFps, currentFps, activeComp) {
+function convertFrameRate(targetFps) {
+    activeComp = api.getActiveComp();
+    if (!activeComp) {
+        console.log("Error: No active composition found");
+        return;
+    }
+
+    try {
+        currentFps = api.get(activeComp, "fps");
+        if (!currentFps || currentFps <= 0) {
+            currentFps = 25;
+        }
+    } catch(e) {
+        console.log("Could not get current FPS, using default 25");
+        currentFps = 25;
+    }
+
     try {
         var ratio = targetFps / currentFps;
         
@@ -189,10 +175,12 @@ function convertFrameRate(targetFps, currentFps, activeComp) {
                     for (var keyIdx = 0; keyIdx < keyframeTimes.length; keyIdx++) {
                         var oldFrame = keyframeTimes[keyIdx];
                         var keyframeId = keyframeIds[keyIdx];
-                        var newFrame = Math.round(oldFrame * ratio);
+                        var exactNewFrame = oldFrame * ratio;  // Keep exact value for collision resolution
+                        var newFrame = Math.round(exactNewFrame);
                         
                         var keyframeInfo = {
                             oldFrame: oldFrame,
+                            exactNewFrame: exactNewFrame,  // Store exact value
                             newFrame: newFrame,
                             keyframeId: keyframeId,
                             keyData: null
@@ -206,6 +194,38 @@ function convertFrameRate(targetFps, currentFps, activeComp) {
                         }
                         
                         keyframeDataArray.push(keyframeInfo);
+                    }
+                    
+                    // Smart collision resolution: gives each frame to the keyframe closest to it
+                    // This prevents keyframes from swapping order due to rounding
+                    for (var keyIdx = 1; keyIdx < keyframeDataArray.length; keyIdx++) {
+                        var prevKey = keyframeDataArray[keyIdx - 1];
+                        var currKey = keyframeDataArray[keyIdx];
+                        
+                        // If current frame is not after previous frame (collision or reversal)
+                        if (currKey.newFrame <= prevKey.newFrame) {
+                            // Calculate which keyframe is closer to the contested frame
+                            var prevDistance = Math.abs(prevKey.newFrame - prevKey.exactNewFrame);
+                            var currDistance = Math.abs(currKey.newFrame - currKey.exactNewFrame);
+                            
+                            // If previous keyframe is closer or equal, push current forward
+                            if (prevDistance <= currDistance) {
+                                currKey.newFrame = prevKey.newFrame + 1;
+                            } else {
+                                // Current keyframe is closer, so push previous backward
+                                // We need to push previous backward and check for chain collisions
+                                prevKey.newFrame = currKey.newFrame - 1;
+                                
+                                // Cascade the change backward to maintain sequence
+                                for (var backIdx = keyIdx - 1; backIdx > 0; backIdx--) {
+                                    var checkPrev = keyframeDataArray[backIdx - 1];
+                                    var checkCurr = keyframeDataArray[backIdx];
+                                    if (checkCurr.newFrame <= checkPrev.newFrame) {
+                                        checkCurr.newFrame = checkPrev.newFrame + 1;
+                                    }
+                                }
+                            }
+                        }
                     }
                     
                     // Now process all keyframes - move them first
@@ -358,6 +378,125 @@ function convertFrameRate(targetFps, currentFps, activeComp) {
             }
             
             processedLayers++;
+        }
+        
+        // Convert Auto Animate timeOffset and Frame behavior properties
+        // These need special handling as they affect timing but aren't keyframed attributes
+        console.log("=== Checking for Auto Animate and Frame behaviors ===");
+        for (var i = 0; i < allLayers.length; i++) {
+            var layerId = allLayers[i];
+            
+            if (!api.layerExists(layerId)) {
+                continue;
+            }
+            
+            try {
+                var layerType = api.getType(layerId);
+                
+                // Debug: log all layer types to see what we're dealing with
+                if (layerType === "autoAnimate" || layerType === "frame") {
+                    console.log("Found " + layerType + " layer: " + layerId);
+                }
+                
+                // Handle Auto Animate deformer timeOffset
+                if (layerType === "autoAnimate") {
+                    console.log("Processing Auto Animate layer: " + layerId);
+                    try {
+                        // Check if timeOffset is animated (has keyframes)
+                        var timeOffsetKeyframes = api.getKeyframeTimes(layerId, "timeOffset");
+                        var isTimeOffsetAnimated = timeOffsetKeyframes && timeOffsetKeyframes.length > 0;
+                        
+                        // Only adjust if not animated (keyframes already handled)
+                        if (!isTimeOffsetAnimated) {
+                            var currentTimeOffset = api.get(layerId, "timeOffset");
+                            var newTimeOffset = currentTimeOffset * ratio;
+                            api.set(layerId, {"timeOffset": newTimeOffset});
+                            console.log("  - Adjusted timeOffset: " + currentTimeOffset + " → " + newTimeOffset);
+                        } else {
+                            console.log("  - Skipped timeOffset (animated)");
+                        }
+                    } catch (e) {
+                        console.log("  - Error adjusting timeOffset: " + e.message);
+                    }
+                }
+                
+                // Handle Frame behavior properties
+                if (layerType === "frame") {
+                    console.log("Processing Frame behavior: " + layerId);
+                    try {
+                        // Check interpolation mode - only process if mode is "Frame" (enum value 0 or not present)
+                        // mode = 0: Frame (frame-based, needs conversion)
+                        // mode = 1: Seconds (time-based, no conversion needed)
+                        var interpMode;
+                        try {
+                            interpMode = api.get(layerId, "mode");
+                        } catch (e) {
+                            interpMode = 0; // Default to Frame mode if not present
+                        }
+                        
+                        console.log("  - Interpolation mode: " + (interpMode === 0 ? "Frame" : "Seconds"));
+                        
+                        if (interpMode === 0) { // Frame mode
+                            // Check which attributes are animated
+                            var valueKeyframes = api.getKeyframeTimes(layerId, "value");
+                            var offsetKeyframes = api.getKeyframeTimes(layerId, "offset");
+                            var startFrameKeyframes = api.getKeyframeTimes(layerId, "startFrame");
+                            
+                            var isValueAnimated = valueKeyframes && valueKeyframes.length > 0;
+                            var isOffsetAnimated = offsetKeyframes && offsetKeyframes.length > 0;
+                            var isStartFrameAnimated = startFrameKeyframes && startFrameKeyframes.length > 0;
+                            
+                            // Adjust value (divide by ratio to maintain visual speed)
+                            if (!isValueAnimated) {
+                                try {
+                                    var currentValue = api.get(layerId, "value");
+                                    var newValue = currentValue / ratio;
+                                    api.set(layerId, {"value": newValue});
+                                    console.log("  - Adjusted value: " + currentValue + " → " + newValue);
+                                } catch (e) {
+                                    console.log("  - Error adjusting value: " + e.message);
+                                }
+                            } else {
+                                console.log("  - Skipped value (animated)");
+                            }
+                            
+                            // Adjust offset (multiply by ratio)
+                            if (!isOffsetAnimated) {
+                                try {
+                                    var currentOffset = api.get(layerId, "offset");
+                                    var newOffset = currentOffset * ratio;
+                                    api.set(layerId, {"offset": newOffset});
+                                    console.log("  - Adjusted offset: " + currentOffset + " → " + newOffset);
+                                } catch (e) {
+                                    console.log("  - Error adjusting offset: " + e.message);
+                                }
+                            } else {
+                                console.log("  - Skipped offset (animated)");
+                            }
+                            
+                            // Adjust startFrame (multiply by ratio)
+                            if (!isStartFrameAnimated) {
+                                try {
+                                    var currentStartFrame = api.get(layerId, "startFrame");
+                                    var newStartFrame = Math.round(currentStartFrame * ratio);
+                                    api.set(layerId, {"startFrame": newStartFrame});
+                                    console.log("  - Adjusted startFrame: " + currentStartFrame + " → " + newStartFrame);
+                                } catch (e) {
+                                    console.log("  - Error adjusting startFrame: " + e.message);
+                                }
+                            } else {
+                                console.log("  - Skipped startFrame (animated)");
+                            }
+                        } else {
+                            console.log("  - Skipped (mode is Seconds, not Frame)");
+                        }
+                    } catch (e) {
+                        console.log("  - Error processing Frame behavior: " + e.message);
+                    }
+                }
+            } catch (e) {
+                // Could not get layer type - this is normal for most layers
+            }
         }
         
         // Get current ranges BEFORE updating frame rate
