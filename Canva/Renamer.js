@@ -2,7 +2,7 @@
 // Add, Replace, or Number assets or layers
 
 // Set window title
-ui.setTitle("Asset Panel Renamer");
+ui.setTitle("Renamer");
 
 // =============================================================================
 // ADD TAB CONTROLS
