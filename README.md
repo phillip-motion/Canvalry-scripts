@@ -53,6 +53,8 @@ Sets all image shaders to mipmaps in the current composition. Clean up those cru
 Simple script to compare update versions against a json file and log a console alert.
 
 ### Notes
-Some scripts make web API calls simply to check for updates. Please feel free to open pull requests and contribute! Licensed under the MIT license.
+Some scripts make web API calls simply to check for updates. 
 
-Brought to you by the Canva Creative Team. Scripts created by Jack Jaeschke and Sam Mularczyk with assistance from Cursor.
+Feel free to open pull requests, dig through the code and use this to build your own tools. We release these freely under the MIT license to help further the Cavalry community!
+
+Brought to you by the Canva Creative Team with assistance from Cursor. Repo maintained by Phillip Tibballs, Jack Jaeschke and Sam Mularczyk.
