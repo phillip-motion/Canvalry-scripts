@@ -7,6 +7,9 @@ A collection of Cavalry scripts from Canva’s Motion Powerhouse team to speed u
   </a>
 </p>
 
+> [!IMPORTANT]
+> If you're using Cavalry Free, please use the encrypted scripts in the .jsc folder (these may not be as up to date as the .js files)
+
 ## Convert Frame Rate
 <img width="312" height="230" alt="Screenshot 2025-11-05 at 21 38 38" src="https://github.com/user-attachments/assets/f14bfb71-ad9c-47d2-af95-4946a854d09e" />
 
