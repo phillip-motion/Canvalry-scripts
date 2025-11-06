@@ -7,6 +7,8 @@ A collection of Cavalry scripts from Canva’s Motion Powerhouse team to speed u
   </a>
 </p>
 
+Install by copying the Canva folder to your Cavalry Scripts directory.
+
 > [!IMPORTANT]
 > If you're using Cavalry Free, please use the encrypted scripts in the .jsc folder (these may not be as up to date as the .js files)
 
