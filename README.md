@@ -55,4 +55,4 @@ Simple script to compare update versions against a json file and log a console a
 ### Notes
 Some scripts make web API calls simply to check for updates. Please feel free to open pull requests and contribute! Licensed under the MIT license.
 
-Brought to you by the Canva Creative Team.
+Brought to you by the Canva Creative Team. Scripts created by Jack Jaeschke and Sam Mularczyk with assistance from Cursor.
