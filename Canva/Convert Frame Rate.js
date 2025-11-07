@@ -56,28 +56,35 @@ function checkForUpdate(githubRepo, scriptName, currentVersion, callback) {
     // Uncomment below to reset the version check for testing
     // api.setPreferenceObject(scriptName + "_update_check", {
     //     lastCheck: null,
-    //     latestVersion: null,
-    //     newVersionAvailable: false
+    //     latestVersion: null
     // });
+    
+    var now = new Date().getTime();
+    var oneDayAgo = now - (24 * 60 * 60 * 1000);
+    var shouldFetchFromGithub = true;
+    var cachedLatestVersion = null;
     
     // Check if we have cached data
     if (api.hasPreferenceObject(scriptName + "_update_check")) {
         var prefs = api.getPreferenceObject(scriptName + "_update_check");
-        var now = new Date().getTime();
-        var oneDayAgo = now - (24 * 60 * 60 * 1000);
+        cachedLatestVersion = prefs.latestVersion;
         
-        // If we checked recently and found an update, don't check again
-        if (prefs.newVersionAvailable === true && prefs.lastCheck > oneDayAgo) {
-            console.warn(scriptName + ' ' + prefs.latestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
-            if (callback) callback(true, prefs.latestVersion);
-            return;
+        // If we checked recently, use cached version (don't fetch from GitHub)
+        if (prefs.lastCheck && prefs.lastCheck > oneDayAgo) {
+            shouldFetchFromGithub = false;
         }
-        
-        // If we checked recently and no update was found, skip the check
-        if (prefs.newVersionAvailable === false && prefs.lastCheck > oneDayAgo) {
+    }
+    
+    // If we don't need to fetch, just compare current version to cached latest
+    if (!shouldFetchFromGithub && cachedLatestVersion) {
+        var updateAvailable = compareVersions(cachedLatestVersion, currentVersion) > 0;
+        if (updateAvailable) {
+            console.warn(scriptName + ' ' + cachedLatestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
+            if (callback) callback(true, cachedLatestVersion);
+        } else {
             if (callback) callback(false);
-            return;
         }
+        return;
     }
     
     // Perform the version check
@@ -101,16 +108,14 @@ function checkForUpdate(githubRepo, scriptName, currentVersion, callback) {
                 latestVersion = latestVersion.substring(1);
             }
             
-            var updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
-            
-            // Save to preferences
+            // Save latest version to preferences (always save, regardless of comparison)
             api.setPreferenceObject(scriptName + "_update_check", {
                 lastCheck: new Date().getTime(),
-                latestVersion: latestVersion,
-                newVersionAvailable: updateAvailable
+                latestVersion: latestVersion
             });
             
-            // Notify if update available
+            // Compare and notify if update available
+            var updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
             if (updateAvailable) {
                 console.warn(scriptName + ' ' + latestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
                 if (callback) callback(true, latestVersion);
