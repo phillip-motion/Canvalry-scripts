@@ -7,6 +7,11 @@ A collection of Cavalry scripts from Canva’s Motion Powerhouse team to speed u
   </a>
 </p>
 
+Install by copying the Canva folder to your Cavalry Scripts directory.
+
+> [!IMPORTANT]
+> If you're using Cavalry Free, please use the encrypted scripts in the .jsc folder (these may not be as up to date as the .js files)
+
 ## Convert Frame Rate
 <img width="312" height="230" alt="Screenshot 2025-11-05 at 21 38 38" src="https://github.com/user-attachments/assets/f14bfb71-ad9c-47d2-af95-4946a854d09e" />
 
@@ -28,7 +33,7 @@ Adds a speed graph and allows cubic-bezier notation for easing between two keyfr
 
 You can also save presets, and copy duration and easing values to pass to developers.
 
-If you're looking for a more polished value graph editor that supports Magic Easing, check out [Curves at Scenery.io](https://scenery.io).
+If you're looking for a more polished value graph editor that supports Magic Easing, check out [Curves at Scenery.io](https://scenery.io/scripts/curves-42xvUYqCpvY).
 
 ## Renamer
 <img width="441" height="525" alt="Screenshot 2025-11-05 at 21 41 04" src="https://github.com/user-attachments/assets/c28ccd10-57a7-4623-b029-484e4fdfa32c" />
