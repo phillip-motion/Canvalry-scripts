@@ -52,6 +52,18 @@ Removes all assets not used in a composition.
 ## Set All Image Shaders to Mipmaps
 Sets all image shaders to mipmaps in the current composition. Clean up those crunchy edges.
 
+## Localiser
+Export and import all text strings from a file for translation.
+
+#### When exporting CSV
+1. Rename the "originalValue" column to your default language
+2. Add as many new column to the right as you like and title them with their corresponding language
+3. Enter new translations for each line. Leave a cell blank to keep the original text.
+4. Import back into Localiser and either choose language to apply, or duplicate all comps automatically with new values.
+
+## Find and Replace Text
+Searches all strings in the file and allows you to batch find/replace lines of text. Supports regex.
+
 # Developer Tools
 
 ## Check Update from Github
