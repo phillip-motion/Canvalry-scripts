@@ -55,6 +55,8 @@ Sets all image shaders to mipmaps in the current composition. Clean up those cru
 ## Localiser
 Export and import all text strings from a file for translation.
 
+https://github.com/user-attachments/assets/2a76ae4e-04c3-419d-935f-2144e5d7b75f
+
 #### When exporting CSV
 1. Rename the "originalValue" column to your default language
 2. Add as many new column to the right as you like and title them with their corresponding language
