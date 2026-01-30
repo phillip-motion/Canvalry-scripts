@@ -1532,10 +1532,10 @@ function savePreset() {
 }
 
 function copyCubicBezierToClipboard() {
-    var text = "cubic-bezier(" + currentEasing.x1.toFixed(3) + ", " + 
-               currentEasing.y1.toFixed(3) + ", " + 
-               currentEasing.x2.toFixed(3) + ", " + 
-               currentEasing.y2.toFixed(3) + ")";
+    var text = "cubic-bezier(" + currentEasing.x1.toFixed(2) + ", " + 
+               currentEasing.y1.toFixed(2) + ", " + 
+               currentEasing.x2.toFixed(2) + ", " + 
+               currentEasing.y2.toFixed(2) + ")";
     api.setClipboardText(text);
     console.log("Copied " + text + " to clipboard");
 }
@@ -1837,8 +1837,8 @@ function copyAllKeyframeInfo() {
     try {
         var info = getKeyframeInfo();
         if (info) {
-            var allText = info.propertyName + " " + info.startValue + " > " + info.endValue + "\n" + "Easing: cubic-bezier(" + info.easing + ")" + "\n" +
-                         "Duration: " + info.duration + "ms @ " + getCompositionFrameRate() + "fps" + "\n";
+            var allText = info.propertyName + "\n" + info.startValue + " > " + info.endValue + "\n" + "cubic-bezier(" + info.easing + ")" + "\n" +
+                         "Duration: " + info.duration + "ms" + "\n";
             api.setClipboardText(allText);
             console.log("Copied all keyframe info to clipboard");
         }
