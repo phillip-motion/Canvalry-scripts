@@ -78,7 +78,7 @@ ui.setTitle("Easey");
 
 var GITHUB_REPO = "phillip-motion/Canvalry-scripts";
 var scriptName = "Easey";  // Must match key your repo's versions.json
-var currentVersion = "1.0.0";
+var currentVersion = "1.1.0";
 
 function compareVersions(v1, v2) {
     /* Compare two semantic version strings (e.g., "1.0.0" vs "1.0.1") */
@@ -250,6 +250,9 @@ var isUpdatingFromPreset = false;
 
 // Flag to prevent text input callback loop during programmatic updates
 var isUpdatingTextInput = false;
+
+// Flag to prevent saving tab preference during initialization
+var isInitializingTab = false;
 
 // Create main UI elements
 var graphCanvas = new ui.Draw();
@@ -820,6 +823,9 @@ graphCanvas.onMouseRelease = function(position, button) {
         if (applyOnDragEnabled) {
             applyEasingToKeyframes();
         }
+        
+        // Save current tab after interaction
+        saveLastSelectedTab();
     }
 };
 
@@ -896,6 +902,9 @@ speedGraphCanvas.onMouseRelease = function(position, button) {
         
         // Reset dropdown to show custom curve
         presetList.setText("Select a preset...");
+        
+        // Save current tab after interaction
+        saveLastSelectedTab();
     }
 };
 
@@ -946,119 +955,211 @@ function getEasingFromKeyframes() {
         var selectedKeyframes = api.getSelectedKeyframes();
         var keyframeIds = api.getSelectedKeyframeIds();
         
-        if (keyframeIds.length !== 2) {
-            console.log("Error: Please select exactly 2 keyframes");
+        if (keyframeIds.length < 1) {
+            console.log("Error: Please select at least 1 keyframe");
             return false;
         }
         
-        // Get the attribute path from the first keyframe
-        var attrPath = api.getAttributeFromKeyframeId(keyframeIds[0]);
-        var attrPath2 = api.getAttributeFromKeyframeId(keyframeIds[1]);
-        
-        if (attrPath !== attrPath2) {
-            console.log("Error: Both keyframes must be on the same attribute");
-            return false;
-        }
-        
-        // Find the attribute path that has exactly 2 frames
-        var fullAttributePath = null;
-        var selectedFrames = null;
-        
-        for (let [key, frames] of Object.entries(selectedKeyframes)) {
-            if (frames.length === 2) {
-                fullAttributePath = key;
-                selectedFrames = frames.sort((a, b) => a - b);
-                break;
+        // If only 1 keyframe is selected, extract from its handles
+        if (keyframeIds.length === 1) {
+            var keyframeId = keyframeIds[0];
+            var attrPath = api.getAttributeFromKeyframeId(keyframeId);
+            
+            // Parse attribute path
+            var hashIndex = attrPath.indexOf('#');
+            if (hashIndex === -1) {
+                console.log("Error: Invalid layer ID format");
+                return false;
             }
-        }
-        
-        if (!fullAttributePath) {
-            console.log("Error: Could not find attribute with 2 selected keyframes");
-            return false;
-        }
-        
-        // Parse the full attribute path
-        var hashIndex = fullAttributePath.indexOf('#');
-        if (hashIndex === -1) {
-            console.log("Error: Invalid layer ID format");
-            return false;
-        }
-        
-        var dotAfterHash = fullAttributePath.indexOf('.', hashIndex);
-        if (dotAfterHash === -1) {
-            console.log("Error: Could not parse attribute");
-            return false;
-        }
-        
-        var layerId = fullAttributePath.substring(0, dotAfterHash);
-        var attrId = fullAttributePath.substring(dotAfterHash + 1);
-        
-        var firstFrame = selectedFrames[0];
-        var secondFrame = selectedFrames[1];
-        var frameDiff = secondFrame - firstFrame;
-        
-        // Get keyframe values
-        var currentFrame = api.getFrame();
-        api.setFrame(firstFrame);
-        var firstValue = api.get(layerId, attrId);
-        api.setFrame(secondFrame);
-        var secondValue = api.get(layerId, attrId);
-        api.setFrame(currentFrame);
-        
-        var valueDiff = secondValue - firstValue;
-        
-        // Get bezier data from keyframes
-        var firstKeyData = api.get(keyframeIds[0], 'data');
-        var secondKeyData = api.get(keyframeIds[1], 'data');
-        
-        // Match keyframes to frame numbers
-        var frameZeroData, frameEndData;
-        if (Math.abs(firstKeyData.numValue - firstValue) < 0.1) {
-            frameZeroData = firstKeyData;
-            frameEndData = secondKeyData;
-        } else {
-            frameZeroData = secondKeyData;
-            frameEndData = firstKeyData;
-        }
-        
-        // Extract bezier handles
-        var outHandleX = null, outHandleY = null;
-        var inHandleX = null, inHandleY = null;
-        
-        if (frameZeroData && frameZeroData.rightBez) {
-            outHandleX = frameZeroData.rightBez.x;
-            outHandleY = frameZeroData.rightBez.y;
-        }
-        
-        if (frameEndData && frameEndData.leftBez) {
-            inHandleX = frameEndData.leftBez.x;
-            inHandleY = frameEndData.leftBez.y;
-        }
-        
-        if (outHandleX !== null && inHandleX !== null && frameDiff > 0) {
-            // Keyframes have bezier interpolation
-            var bezier = cavalryToCubicBezier(outHandleX, outHandleY, inHandleX, inHandleY, frameDiff, valueDiff);
+            
+            var dotAfterHash = attrPath.indexOf('.', hashIndex);
+            if (dotAfterHash === -1) {
+                console.log("Error: Could not parse attribute");
+                return false;
+            }
+            
+            var layerId = attrPath.substring(0, dotAfterHash);
+            var attrId = attrPath.substring(dotAfterHash + 1);
+            
+            // Get keyframe data
+            var keyData = api.get(keyframeId, 'data');
+            if (!keyData) {
+                console.log("Error: Could not get keyframe data");
+                return false;
+            }
+            
+            // Check if keyframe has outgoing bezier handle (rightBez)
+            if (!keyData.rightBez) {
+                console.log("Single keyframe has no bezier handles - keeping current curve");
+                return true;
+            }
+            
+            // Use default deltas to convert handles to cubic-bezier
+            var defaultFrameDiff = 30;  // 30 frames
+            var defaultValueDiff = 100; // 100 units
+            
+            // Extract only the outgoing handle (rightBez) and mirror it for incoming
+            // This extracts the easing shape from how the keyframe curves outward
+            var outHandleX = keyData.rightBez.x;
+            var outHandleY = keyData.rightBez.y;
+            
+            // Create symmetric incoming handle (mirror of outgoing)
+            // This gives us a symmetric easing curve based on the outgoing shape
+            var inHandleX = -outHandleX;
+            var inHandleY = -outHandleY;
+            
+            // Convert to cubic-bezier format using the default deltas
+            var bezier = cavalryToCubicBezier(outHandleX, outHandleY, inHandleX, inHandleY, defaultFrameDiff, defaultValueDiff);
+            
             currentEasing = bezier;
             updateTextInput();
             drawCurve();
-            syncValueToSpeed(); // Sync speed graph too
-            return true;
-        } else if (frameDiff > 0) {
-            // Check if keyframes are linear interpolation
-            var firstKeyData = api.get(keyframeIds[0], 'data');
-            var secondKeyData = api.get(keyframeIds[1], 'data');
+            syncValueToSpeed();
             
-            
-            // Keyframes are linear - set to linear easing (0, 0, 1, 1)
-            currentEasing = { x1: 0, y1: 0, x2: 1, y2: 1 };
-            updateTextInput();
-            drawCurve();
-            syncValueToSpeed(); // Sync speed graph too
+            console.log("Extracted easing from single keyframe's handles");
             return true;
-        } else {
-            console.log("Error: Could not extract easing data from keyframes");
+        }
+        
+        // Collect all attribute groups with 2+ keyframes
+        var attributeGroups = {};
+        
+        for (let [fullAttributePath, frames] of Object.entries(selectedKeyframes)) {
+            if (frames.length >= 2) {
+                // Parse the full attribute path
+                var hashIndex = fullAttributePath.indexOf('#');
+                if (hashIndex === -1) continue;
+                
+                var dotAfterHash = fullAttributePath.indexOf('.', hashIndex);
+                if (dotAfterHash === -1) continue;
+                
+                var layerId = fullAttributePath.substring(0, dotAfterHash);
+                var attrId = fullAttributePath.substring(dotAfterHash + 1);
+                
+                // Get keyframe IDs that belong to this specific attribute path
+                var attributeKeyframeIds = [];
+                for (var i = 0; i < keyframeIds.length; i++) {
+                    var keyframeAttrPath = api.getAttributeFromKeyframeId(keyframeIds[i]);
+                    if (keyframeAttrPath === fullAttributePath) {
+                        attributeKeyframeIds.push(keyframeIds[i]);
+                    }
+                }
+                
+                if (attributeKeyframeIds.length >= 2) {
+                    attributeGroups[fullAttributePath] = {
+                        layerId: layerId,
+                        attrId: attrId,
+                        frames: frames.sort((a, b) => a - b),
+                        keyframeIds: attributeKeyframeIds
+                    };
+                }
+            }
+        }
+        
+        if (Object.keys(attributeGroups).length === 0) {
+            console.log("Error: No valid attribute groups found with 2+ keyframes");
             return false;
         }
+        
+        // Accumulate easing values from all pairs
+        var totalX1 = 0, totalY1 = 0, totalX2 = 0, totalY2 = 0;
+        var pairCount = 0;
+        var currentFrame = api.getFrame();
+        
+        // Process each attribute group
+        for (let [attributePath, group] of Object.entries(attributeGroups)) {
+            // Process each consecutive pair of keyframes in this attribute
+            for (var i = 0; i < group.keyframeIds.length - 1; i++) {
+                var currentKeyId = group.keyframeIds[i];
+                var nextKeyId = group.keyframeIds[i + 1];
+                
+                var firstFrame = group.frames[i];
+                var secondFrame = group.frames[i + 1];
+                var frameDiff = secondFrame - firstFrame;
+                
+                if (frameDiff <= 0) continue; // Skip invalid pairs
+                
+                // Get keyframe values
+                api.setFrame(firstFrame);
+                var firstValue = api.get(group.layerId, group.attrId);
+                api.setFrame(secondFrame);
+                var secondValue = api.get(group.layerId, group.attrId);
+                
+                var valueDiff = secondValue - firstValue;
+                
+                // Get bezier data from keyframes
+                var firstKeyData = api.get(currentKeyId, 'data');
+                var secondKeyData = api.get(nextKeyId, 'data');
+                
+                // Match keyframes to frame numbers
+                var frameZeroData, frameEndData;
+                if (Math.abs(firstKeyData.numValue - firstValue) < 0.1) {
+                    frameZeroData = firstKeyData;
+                    frameEndData = secondKeyData;
+                } else {
+                    frameZeroData = secondKeyData;
+                    frameEndData = firstKeyData;
+                }
+                
+                // Extract bezier handles
+                var outHandleX = null, outHandleY = null;
+                var inHandleX = null, inHandleY = null;
+                
+                if (frameZeroData && frameZeroData.rightBez) {
+                    outHandleX = frameZeroData.rightBez.x;
+                    outHandleY = frameZeroData.rightBez.y;
+                }
+                
+                if (frameEndData && frameEndData.leftBez) {
+                    inHandleX = frameEndData.leftBez.x;
+                    inHandleY = frameEndData.leftBez.y;
+                }
+                
+                // Convert to cubic-bezier and accumulate
+                if (outHandleX !== null && inHandleX !== null) {
+                    // Keyframes have bezier interpolation
+                    var bezier = cavalryToCubicBezier(outHandleX, outHandleY, inHandleX, inHandleY, frameDiff, valueDiff);
+                    totalX1 += bezier.x1;
+                    totalY1 += bezier.y1;
+                    totalX2 += bezier.x2;
+                    totalY2 += bezier.y2;
+                    pairCount++;
+                } else {
+                    // Linear keyframes - treat as (0, 0, 1, 1)
+                    totalX1 += 0;
+                    totalY1 += 0;
+                    totalX2 += 1;
+                    totalY2 += 1;
+                    pairCount++;
+                }
+            }
+        }
+        
+        // Restore original frame position
+        api.setFrame(currentFrame);
+        
+        if (pairCount === 0) {
+            console.log("Error: Could not extract easing data from any keyframe pairs");
+            return false;
+        }
+        
+        // Calculate average
+        var avgX1 = totalX1 / pairCount;
+        var avgY1 = totalY1 / pairCount;
+        var avgX2 = totalX2 / pairCount;
+        var avgY2 = totalY2 / pairCount;
+        
+        // Set the averaged easing
+        currentEasing = { x1: avgX1, y1: avgY1, x2: avgX2, y2: avgY2 };
+        updateTextInput();
+        drawCurve();
+        syncValueToSpeed(); // Sync speed graph too
+        
+        // Log feedback about averaging
+        if (pairCount > 1) {
+            console.log("Averaged easing from " + pairCount + " keyframe pairs");
+        }
+        
+        return true;
         
     } catch (error) {
         console.log("Error: " + error.message);
@@ -1259,6 +1360,81 @@ function unlockAllKeyframes(keyframeIds, attrId, layerId, selectedFrames) {
     }
 }
 
+// Apply easing to a single keyframe's both handles independently
+function applyEasingToSingleKeyframe(keyframeId, attrId, layerId, frame, value) {
+    try {
+        // Use default deltas for single keyframe handle calculation
+        var defaultFrameDiff = 30;  // 30 frames (1 second at 30fps)
+        var defaultValueDiff = 100; // 100 units
+        
+        // Convert cubic bezier to Cavalry format for both handles
+        var cavalryHandles = cubicBezierToCavalry(
+            currentEasing.x1, currentEasing.y1, 
+            currentEasing.x2, currentEasing.y2, 
+            defaultFrameDiff, defaultValueDiff
+        );
+        
+        // Set interpolation to bezier and unlock
+        var keyData = api.get(keyframeId, 'data');
+        if (keyData && keyData.interpolation !== 0) {
+            api.modifyKeyframe(keyframeId, 'interpolation', 0);
+            keyData = api.get(keyframeId, 'data');
+        }
+        
+        // Ensure bezier handles exist
+        if (keyData) {
+            if (!keyData.leftBez) {
+                try {
+                    api.modifyKeyframe(keyframeId, 'leftBez.x', 0);
+                    api.modifyKeyframe(keyframeId, 'leftBez.y', 0);
+                } catch (e) {
+                    console.log("Could not create leftBez handle:", e.message);
+                }
+            }
+            if (!keyData.rightBez) {
+                try {
+                    api.modifyKeyframe(keyframeId, 'rightBez.x', 0);
+                    api.modifyKeyframe(keyframeId, 'rightBez.y', 0);
+                } catch (e) {
+                    console.log("Could not create rightBez handle:", e.message);
+                }
+            }
+        }
+        
+        // Apply easing to both handles independently
+        var unlocked = { angleLocked: false, weightLocked: false };
+        
+        // Apply outgoing handle (rightBez)
+        var tangentObjOut = {};
+        tangentObjOut[attrId] = {
+            frame: frame,
+            inHandle: false,
+            outHandle: true,
+            xValue: frame + cavalryHandles.outHandleX,
+            yValue: value + cavalryHandles.outHandleY,
+            ...unlocked
+        };
+        api.modifyKeyframeTangent(layerId, tangentObjOut);
+        
+        // Apply incoming handle (leftBez) - uses incoming handle values
+        var tangentObjIn = {};
+        tangentObjIn[attrId] = {
+            frame: frame,
+            inHandle: true,
+            outHandle: false,
+            xValue: frame + cavalryHandles.inHandleX,
+            yValue: value + cavalryHandles.inHandleY,
+            ...unlocked
+        };
+        api.modifyKeyframeTangent(layerId, tangentObjIn);
+        
+        return true;
+    } catch (error) {
+        console.log("Error applying easing to single keyframe:", error.message);
+        return false;
+    }
+}
+
 // MULTI-ATTRIBUTE KEYFRAME PROCESSING
 // MAJOR DISCOVERY: Can apply easing to keyframes across multiple layers and properties simultaneously
 // This was a significant breakthrough that makes the tool much more powerful for batch operations
@@ -1268,9 +1444,62 @@ function applyEasingToKeyframes() {
         var selectedKeyframes = api.getSelectedKeyframes();  // Object with attribute paths as keys, frame arrays as values
         var keyframeIds = api.getSelectedKeyframeIds();      // Array of keyframe ID strings
         
-        if (keyframeIds.length < 2) {
-            console.log("Error: Please select at least 2 keyframes");
+        if (keyframeIds.length < 1) {
+            console.log("Error: Please select at least 1 keyframe");
             return false;
+        }
+        
+        // SPECIAL CASE: Single keyframe selected - apply to both handles
+        if (keyframeIds.length === 1) {
+            var keyframeId = keyframeIds[0];
+            var attrPath = api.getAttributeFromKeyframeId(keyframeId);
+            
+            // Parse attribute path
+            var hashIndex = attrPath.indexOf('#');
+            if (hashIndex === -1) {
+                console.log("Error: Invalid layer ID format");
+                return false;
+            }
+            
+            var dotAfterHash = attrPath.indexOf('.', hashIndex);
+            if (dotAfterHash === -1) {
+                console.log("Error: Could not parse attribute");
+                return false;
+            }
+            
+            var layerId = attrPath.substring(0, dotAfterHash);
+            var attrId = attrPath.substring(dotAfterHash + 1);
+            
+            // Get keyframe's frame number from selectedKeyframes object
+            var keyframeFrame = null;
+            for (let [path, frames] of Object.entries(selectedKeyframes)) {
+                if (path === attrPath && frames.length === 1) {
+                    keyframeFrame = frames[0];
+                    break;
+                }
+            }
+            
+            if (keyframeFrame === null) {
+                console.log("Error: Could not determine keyframe frame number");
+                return false;
+            }
+            
+            // Get keyframe's value
+            var currentFrame = api.getFrame();
+            api.setFrame(keyframeFrame);
+            var value = api.get(layerId, attrId);
+            
+            // Apply easing to both handles of this single keyframe
+            var success = applyEasingToSingleKeyframe(keyframeId, attrId, layerId, keyframeFrame, value);
+            
+            // Restore frame position
+            api.setFrame(currentFrame);
+            
+            if (success) {
+                console.log("Applied easing to single keyframe's incoming and outgoing handles");
+            }
+            
+            return success;
         }
         
         // GROUPING STRATEGY: Group keyframes by their full attribute paths
@@ -1947,10 +2176,16 @@ applyButton.onClick = function() {
     if (currentTab === 0) { // Speed tab
         speedGraphModified = true;
     }
+    
+    // Save current tab after interaction
+    saveLastSelectedTab();
 };
 
 getButton.onClick = function() {
     getEasingFromKeyframes();
+    
+    // Save current tab after interaction
+    saveLastSelectedTab();
 };
 
 mainContextButton.onClick = function() {
@@ -1990,7 +2225,17 @@ presetList.onValueChanged = function() {
     // Handle regular presets
     if (selectedPreset && presets[selectedPreset]) {
         isUpdatingFromPreset = true; // Set flag to prevent dropdown reset
-        currentEasing = Object.assign({}, presets[selectedPreset]);
+        var preset = presets[selectedPreset];
+        
+        // Auto-switch to Value tab if preset has custom Y values
+        // Check if Y values are non-normalized (not 0 and 1)
+        var hasCustomYValues = (preset.y1 !== 0 || preset.y2 !== 1);
+        if (hasCustomYValues && tabView.currentTab() === 0) {
+            // Switch to Value tab (index 1) for presets with custom Y values
+            tabView.setTab(1);
+        }
+        
+        currentEasing = Object.assign({}, preset);
         
         // If Speed tab is active, normalize y values for speed mode
         var currentTab = tabView.currentTab();
@@ -2004,6 +2249,9 @@ presetList.onValueChanged = function() {
         syncValueToSpeed(); // Update speed graph handles
         drawSpeedCurve(); // Update speed graph curve
         isUpdatingFromPreset = false; // Clear flag
+        
+        // Save current tab after interaction
+        saveLastSelectedTab();
     }
 };
 
@@ -2088,6 +2336,22 @@ function saveApplyOnDragSetting() {
     }
 }
 
+// Save last selected tab to preferences
+function saveLastSelectedTab() {
+    // Don't save during initialization
+    if (isInitializingTab) {
+        return;
+    }
+    
+    try {
+        var currentTab = tabView.currentTab();
+        console.log("Saving tab preference:", currentTab);
+        api.setPreferenceObject("easey_lastSelectedTab", currentTab);
+    } catch (e) {
+        console.log("Could not save last selected tab:", e.message);
+    }
+}
+
 // PRESET PERSISTENCE MANAGEMENT
 // CRITICAL DISCOVERY: Default presets must be handled carefully to respect user deletions
 // PROBLEM: If you merge saved presets with defaults, deleted presets come back on reload
@@ -2118,6 +2382,28 @@ function loadSavedPresets() {
         
     } catch (e) {
         console.log("Could not load presets from preferences:", e.message);
+    }
+}
+
+// Load last selected tab from preferences
+function loadLastSelectedTab() {
+    try {
+        if (api.hasPreferenceObject("easey_lastSelectedTab")) {
+            var savedTab = api.getPreferenceObject("easey_lastSelectedTab");
+            console.log("Loading saved tab preference:", savedTab);
+            if (savedTab !== null && savedTab !== undefined) {
+                tabView.setTab(savedTab);
+                console.log("Set tab to:", savedTab);
+            }
+        } else {
+            console.log("No saved tab preference found - saving current tab as default");
+            // Save the default tab (Speed = 0) on first run
+            var currentTab = tabView.currentTab();
+            api.setPreferenceObject("easey_lastSelectedTab", currentTab);
+            console.log("Saved default tab:", currentTab);
+        }
+    } catch (e) {
+        console.log("Could not load last selected tab:", e.message);
     }
 }
 
@@ -2216,7 +2502,7 @@ drawSpeedCurve();
 // Add tab change handler with Y-value backup/restore
 tabView.onTabChanged = function() {
     var currentTab = tabView.currentTab();
-    console.log(currentTab);
+    console.log("Tab changed to:", currentTab);
     
     if (currentTab === 0) {
         // Switched to Speed tab
@@ -2248,6 +2534,9 @@ tabView.onTabChanged = function() {
         backupYValues = null;
         speedGraphModified = false;
     }
+    
+    // Save the selected tab preference
+    saveLastSelectedTab();
 };
 
 // Set minimum window size but allow resizing
@@ -2258,4 +2547,21 @@ ui.setMinimumHeight(graphHeight + 60); // Add space for buttons and text input
 
 // Show the window
 ui.show();
+
+// Restore last selected tab from preferences (after UI is shown)
+console.log("Starting tab initialization");
+isInitializingTab = true;
+loadLastSelectedTab();
+
+// Reset flag after a brief delay to ensure tab change handler completes
+var initTimerCallback = {
+    onTimeout: function() {
+        isInitializingTab = false;
+        console.log("Tab initialization complete");
+    }
+};
+var initTimer = new api.Timer(initTimerCallback);
+initTimer.setInterval(100); // 100ms
+initTimer.setRepeating(false);
+initTimer.start();
 
