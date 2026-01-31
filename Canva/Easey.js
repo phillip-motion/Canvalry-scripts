@@ -18,7 +18,9 @@
 //
 // 1. MODIFIER KEY DETECTION:
 //    - Mouse event 'modifiers' parameter is undefined in Cavalry
-//    - Solution: Use api.isShiftHeld() for reliable shift key detection
+//    - Solution: Use api.isShiftHeld(), api.isControlHeld() for reliable key detection
+//    - api.isControlHeld() = Cmd on macOS, Control on Windows
+//    - Speed Graph: Shift locks Y (X-only movement), Cmd/Ctrl mirrors handles
 //    - Reference: https://docs.cavalry.scenegroup.co/tech-info/scripting/api-module/#isshiftheld
 //
 // 2. KEYFRAME SELECTION HANDLING:
@@ -218,15 +220,15 @@ var speedDragging = false;
 var speedDragHandle = null; // 'out' or 'in'
 var speedHandleRadius = 6;
 
-// Speed graph state (percentages 0-100)
+// Speed graph state
+// X values are percentages 0-100 (influence)
+// Y values are 0-1 range (speed intensity)
 var speedEasing = {
-    outInfluence: 33,  // Default 33%
-    inInfluence: 33    // Default 33%
+    outInfluence: 33,  // Default 33% X influence
+    inInfluence: 33,   // Default 33% X influence
+    outSpeedY: 0,      // Left handle Y position (0 = baseline, 1 = top) -> maps to y1
+    inSpeedY: 0        // Right handle Y position (0 = baseline, 1 = top) -> maps to (1 - y2)
 };
-
-// Backup Y values when switching to Speed tab (for restoration if unmodified)
-var backupYValues = null;
-var speedGraphModified = false;
 
 // Shift+drag axis constraint variables
 // IMPLEMENTATION NOTES:
@@ -349,21 +351,25 @@ function cavalryToCubicBezier(outHandleX, outHandleY, inHandleX, inHandleY, fram
     };
 }
 
-// Convert speed percentages to cubic-bezier (with y=0 and y=1)
-function speedToCubicBezier(outInfluence, inInfluence) {
+// Convert speed values to cubic-bezier
+// outInfluence/inInfluence: 0-100 percentage (X influence)
+// outSpeedY/inSpeedY: 0-1 range (Y speed intensity)
+function speedToCubicBezier(outInfluence, inInfluence, outSpeedY, inSpeedY) {
     return {
         x1: outInfluence / 100,
-        y1: 0,
+        y1: outSpeedY,                    // Left handle Y maps directly to y1
         x2: 1 - (inInfluence / 100),
-        y2: 1
+        y2: 1 - inSpeedY                  // Right handle Y is inverted: inSpeedY=0 -> y2=1, inSpeedY=1 -> y2=0
     };
 }
 
-// Convert cubic-bezier to speed percentages (flatten y values)
+// Convert cubic-bezier to speed values
 function cubicBezierToSpeed(x1, y1, x2, y2) {
     return {
         outInfluence: x1 * 100,
-        inInfluence: (1 - x2) * 100
+        inInfluence: (1 - x2) * 100,
+        outSpeedY: y1,                    // y1 maps directly to left handle Y
+        inSpeedY: 1 - y2                  // y2 is inverted: y2=1 -> inSpeedY=0, y2=0 -> inSpeedY=1
     };
 }
 
@@ -414,23 +420,20 @@ function sampleVelocityCurve(x1, y1, x2, y2, sampleCount) {
     return samples;
 }
 
-// Sync speed graph to value graph (and mark as modified)
+// Sync speed graph to value graph
 function syncSpeedToValue() {
-    var cubic = speedToCubicBezier(speedEasing.outInfluence, speedEasing.inInfluence);
+    var cubic = speedToCubicBezier(speedEasing.outInfluence, speedEasing.inInfluence, speedEasing.outSpeedY, speedEasing.inSpeedY);
     currentEasing.x1 = cubic.x1;
-    currentEasing.y1 = cubic.y1;  // Always 0 in speed mode
+    currentEasing.y1 = cubic.y1;  // Now controlled by outSpeedY
     currentEasing.x2 = cubic.x2;
-    currentEasing.y2 = cubic.y2;  // Always 1 in speed mode
-    speedGraphModified = true; // Mark that speed graph was modified
+    currentEasing.y2 = cubic.y2;  // Now controlled by inSpeedY (inverted)
     drawCurve();
 }
 
 // Sync value graph to speed graph
+// Note: drawSpeedCurve() now handles the sync internally, so this just triggers a redraw
 function syncValueToSpeed() {
-    var speed = cubicBezierToSpeed(currentEasing.x1, currentEasing.y1, currentEasing.x2, currentEasing.y2);
-    speedEasing.outInfluence = speed.outInfluence;
-    speedEasing.inInfluence = speed.inInfluence;
-    drawSpeedCurve();
+    drawSpeedCurve();  // Will sync speedEasing from currentEasing internally
 }
 
 // Draw the easing curve on the canvas
@@ -542,10 +545,22 @@ function drawCurve() {
     
     // Trigger redraw
     graphCanvas.redraw();
+    
+    // Always keep Speed graph in sync with Value graph
+    // This ensures both graphs reflect the same values without relying on onTabChanged
+    drawSpeedCurve();
 }
 
 // Draw the speed curve on the speed graph canvas (velocity-based)
 function drawSpeedCurve() {
+    // Always sync speedEasing from currentEasing before drawing
+    // This ensures the Speed graph reflects current values even if tab change handler didn't fire
+    var speed = cubicBezierToSpeed(currentEasing.x1, currentEasing.y1, currentEasing.x2, currentEasing.y2);
+    speedEasing.outInfluence = speed.outInfluence;
+    speedEasing.inInfluence = speed.inInfluence;
+    speedEasing.outSpeedY = speed.outSpeedY;
+    speedEasing.inSpeedY = speed.inSpeedY;
+    
     speedGraphCanvas.clearPaths();
     
     var width = speedGraphWidth;
@@ -572,10 +587,11 @@ function drawSpeedCurve() {
     }
     
     // Graph coordinates
+    // In Cavalry: Y increases upward, so endY (small) is visual bottom, startY (large) is visual top
     var startX = padding;
-    var startY = height - padding;  // Bottom
+    var startY = height - padding;  // Visual top (higher Y value)
     var endX = width - padding;
-    var endY = padding;              // Top
+    var endY = padding;              // Visual bottom (lower Y value)
     var midX = startX + (endX - startX) / 2;
     
     // Get current cubic-bezier values directly from currentEasing
@@ -590,51 +606,83 @@ function drawSpeedCurve() {
     var x1Clamped = Math.min(0.999, Math.max(0.001, x1));
     var x2Clamped = Math.min(0.999, Math.max(0.001, x2));
     
+    var graphHeight = startY - endY;
+    
+    // Calculate handle positions FIRST (needed for curve endpoints)
+    // X position: influence percentage from corners toward middle
+    var outHandleX = startX + (speedEasing.outInfluence / 100) * (midX - startX);
+    var inHandleX = endX - (speedEasing.inInfluence / 100) * (endX - midX);
+    
+    // Y position: speed intensity (0 = bottom baseline, 1 = top)
+    // In Cavalry's coordinate system: endY is visual bottom, startY is visual top
+    var outHandleY = endY + (speedEasing.outSpeedY * graphHeight);
+    var inHandleY = endY + (speedEasing.inSpeedY * graphHeight);
+    
     // Sample velocity curve (50 samples for smooth curve)
     var sampleCount = 50;
     var velocitySamples = sampleVelocityCurve(x1Clamped, y1, x2Clamped, y2, sampleCount);
     
-    // Draw velocity curve
+    // Draw velocity curve - shifted/tilted to connect handle Y positions
+    // This preserves the curve shape (peaks/valleys) while anchoring endpoints to handles
     var curvePath = new cavalry.Path();
-    var graphHeight = startY - endY;
     
-    // Start at first sample
-    var firstX = startX;
-    var firstY = endY + (velocitySamples[0] * graphHeight);
-    curvePath.moveTo(firstX, firstY);
+    // Get the raw start/end values from the velocity samples (normalized 0-1)
+    var rawStartVal = velocitySamples[0];
+    var rawEndVal = velocitySamples[sampleCount];
     
-    // Draw line through all samples
+    // Target values are the speed Y intensities (0-1 range)
+    var targetStartVal = speedEasing.outSpeedY;
+    var targetEndVal = speedEasing.inSpeedY;
+    
+    // Calculate how much to shift start and end points
+    var deltaStart = targetStartVal - rawStartVal;
+    var deltaEnd = targetEndVal - rawEndVal;
+    
+    // Start at left handle position
+    var firstY = endY + (targetStartVal * graphHeight);
+    curvePath.moveTo(startX, firstY);
+    
+    // Draw line through all samples with linear shift interpolation
+    // This "tilts" the curve to connect handles while preserving shape
     for (var i = 1; i <= sampleCount; i++) {
         var t = i / sampleCount;
         var sampleX = startX + t * (endX - startX);
-        var sampleY = endY + (velocitySamples[i] * graphHeight);
+        
+        // Linear interpolation of the shift amount
+        var shift = deltaStart + t * (deltaEnd - deltaStart);
+        
+        // Apply shift to preserve curve shape while connecting endpoints
+        var transformedVal = velocitySamples[i] + shift;
+        
+        // Map to Y position (0 = bottom/endY, 1 = top/startY)
+        var sampleY = endY + (transformedVal * graphHeight);
         curvePath.lineTo(sampleX, sampleY);
     }
     
     var curvePaint = {"color": "#ffffff", "stroke": true, "strokeWidth": 2};
     speedGraphCanvas.addPath(curvePath.toObject(), curvePaint);
     
-    // Calculate handle positions on X-axis (bottom corners)
-    var outHandleX = startX + (speedEasing.outInfluence / 100) * (midX - startX);
-    var inHandleX = endX - (speedEasing.inInfluence / 100) * (endX - midX);
-    
-    // Draw handles at bottom corners
+    // Draw handles at calculated positions
     var handle1Path = new cavalry.Path();
-    handle1Path.addEllipse(outHandleX, endY, 6, 6);
+    handle1Path.addEllipse(outHandleX, outHandleY, 6, 6);
     
     var handle2Path = new cavalry.Path();
-    handle2Path.addEllipse(inHandleX, endY, 6, 6);
+    handle2Path.addEllipse(inHandleX, inHandleY, 6, 6);
     
     var handlePaint = {"color": ui.getThemeColor("Accent1"), "stroke": false};
     speedGraphCanvas.addPath(handle1Path.toObject(), handlePaint);
     speedGraphCanvas.addPath(handle2Path.toObject(), handlePaint);
     
-    // Draw horizontal lines along bottom corners
+    // Draw horizontal lines from edges to handles (both at same Y level)
     var linePath = new cavalry.Path();
-    linePath.moveTo(startX, endY);
-    linePath.lineTo(outHandleX, endY);
-    linePath.moveTo(inHandleX, endY);
-    linePath.lineTo(endX, endY);
+    
+    // Left handle: horizontal line from left edge to handle (both at outHandleY)
+    linePath.moveTo(startX, outHandleY);       // Left edge at handle's Y
+    linePath.lineTo(outHandleX, outHandleY);   // To handle position
+    
+    // Right handle: horizontal line from right edge to handle (both at inHandleY)
+    linePath.moveTo(endX, inHandleY);          // Right edge at handle's Y
+    linePath.lineTo(inHandleX, inHandleY);     // To handle position
     
     var linePaint = {"color": ui.getThemeColor("Accent1"), "stroke": true, "strokeWidth": 2};
     speedGraphCanvas.addPath(linePath.toObject(), linePaint);
@@ -832,23 +880,28 @@ graphCanvas.onMouseRelease = function(position, button) {
 // Speed graph mouse event handlers
 speedGraphCanvas.onMousePress = function(position, button) {
     var startX = speedGraphPadding;
-    var startY = speedGraphHeight - speedGraphPadding;  // Bottom
+    var startY = speedGraphHeight - speedGraphPadding;  // Visual top (higher Y value)
     var endX = speedGraphWidth - speedGraphPadding;
-    var endY = speedGraphPadding;  // Top
+    var endY = speedGraphPadding;  // Visual bottom (lower Y value)
     var midX = startX + (endX - startX) / 2;
+    var graphHeight = startY - endY;
     
-    // Calculate handle positions (both at bottom corners)
+    // Calculate handle positions (X and Y)
+    // In Cavalry: endY is visual bottom, startY is visual top
     var outHandleX = startX + (speedEasing.outInfluence / 100) * (midX - startX);
     var inHandleX = endX - (speedEasing.inInfluence / 100) * (endX - midX);
+    var outHandleY = endY + (speedEasing.outSpeedY * graphHeight);
+    var inHandleY = endY + (speedEasing.inSpeedY * graphHeight);
     
-    var dist1 = Math.abs(position.x - outHandleX);
-    var dist2 = Math.abs(position.x - inHandleX);
+    // Calculate distance to each handle (2D distance)
+    var dist1 = Math.sqrt(Math.pow(position.x - outHandleX, 2) + Math.pow(position.y - outHandleY, 2));
+    var dist2 = Math.sqrt(Math.pow(position.x - inHandleX, 2) + Math.pow(position.y - inHandleY, 2));
     
-    // Check if click is near bottom corners and near handle X position
-    if (dist1 < speedHandleRadius * 2 && Math.abs(position.y - endY) < speedHandleRadius * 2) {
+    // Check if click is near either handle
+    if (dist1 < speedHandleRadius * 2) {
         speedDragging = true;
         speedDragHandle = 'out';
-    } else if (dist2 < speedHandleRadius * 2 && Math.abs(position.y - endY) < speedHandleRadius * 2) {
+    } else if (dist2 < speedHandleRadius * 2) {
         speedDragging = true;
         speedDragHandle = 'in';
     }
@@ -858,31 +911,56 @@ speedGraphCanvas.onMouseMove = function(position, modifiers) {
     if (!speedDragging) return;
     
     var startX = speedGraphPadding;
+    var startY = speedGraphHeight - speedGraphPadding;  // Visual top (higher Y)
     var endX = speedGraphWidth - speedGraphPadding;
+    var endY = speedGraphPadding;  // Visual bottom (lower Y)
     var midX = startX + (endX - startX) / 2; // Halfway point
+    var graphHeight = startY - endY;
     
-    // Check if shift is held for mirroring behavior
+    // Check modifier keys:
+    // - Shift: Lock Y position (only allow X movement)
+    // - Cmd/Control: Mirror handles
     var shiftPressed = api.isShiftHeld();
+    var cmdPressed = api.isControlHeld();  // Cmd on macOS, Control on Windows
     
     if (speedDragHandle === 'out') {
-        // Clamp to left half of graph (0% to middle)
+        // X: Clamp to left half of graph (0% to middle)
         var clampedX = Math.max(startX, Math.min(midX, position.x));
         // Convert position to influence (0-100%)
         speedEasing.outInfluence = ((clampedX - startX) / (midX - startX)) * 100;
         
-        // Mirror to incoming handle if shift is held
-        if (shiftPressed) {
+        // Y: Only update if Shift is NOT held (Shift locks Y)
+        if (!shiftPressed) {
+            // Y: Clamp to graph bounds (0-1 range)
+            // In Cavalry: Y=0 at bottom, Y increases upward, so endY is visual bottom, startY is visual top
+            var clampedY = Math.max(endY, Math.min(startY, position.y));
+            // Convert position to speed intensity (0 at visual bottom, 1 at visual top)
+            speedEasing.outSpeedY = (clampedY - endY) / graphHeight;
+        }
+        
+        // Mirror to incoming handle if Cmd/Control is held
+        if (cmdPressed) {
             speedEasing.inInfluence = speedEasing.outInfluence;
+            speedEasing.inSpeedY = speedEasing.outSpeedY;
         }
     } else if (speedDragHandle === 'in') {
-        // Clamp to right half of graph (middle to 100%)
+        // X: Clamp to right half of graph (middle to 100%)
         var clampedX = Math.max(midX, Math.min(endX, position.x));
         // Convert position to influence (0-100%)
         speedEasing.inInfluence = ((endX - clampedX) / (endX - midX)) * 100;
         
-        // Mirror to outgoing handle if shift is held
-        if (shiftPressed) {
+        // Y: Only update if Shift is NOT held (Shift locks Y)
+        if (!shiftPressed) {
+            // Y: Clamp to graph bounds (0-1 range)
+            var clampedY = Math.max(endY, Math.min(startY, position.y));
+            // Convert position to speed intensity (0 at visual bottom, 1 at visual top)
+            speedEasing.inSpeedY = (clampedY - endY) / graphHeight;
+        }
+        
+        // Mirror to outgoing handle if Cmd/Control is held
+        if (cmdPressed) {
             speedEasing.outInfluence = speedEasing.inInfluence;
+            speedEasing.outSpeedY = speedEasing.inSpeedY;
         }
     }
     
@@ -2171,12 +2249,6 @@ function deleteAllPresets() {
 applyButton.onClick = function() {
     applyEasingToKeyframes();
     
-    // If on Speed tab, mark as modified so y values stay normalized
-    var currentTab = tabView.currentTab();
-    if (currentTab === 0) { // Speed tab
-        speedGraphModified = true;
-    }
-    
     // Save current tab after interaction
     saveLastSelectedTab();
 };
@@ -2227,22 +2299,8 @@ presetList.onValueChanged = function() {
         isUpdatingFromPreset = true; // Set flag to prevent dropdown reset
         var preset = presets[selectedPreset];
         
-        // Auto-switch to Value tab if preset has custom Y values
-        // Check if Y values are non-normalized (not 0 and 1)
-        var hasCustomYValues = (preset.y1 !== 0 || preset.y2 !== 1);
-        if (hasCustomYValues && tabView.currentTab() === 0) {
-            // Switch to Value tab (index 1) for presets with custom Y values
-            tabView.setTab(1);
-        }
-        
+        // Apply preset values (both tabs now support Y values)
         currentEasing = Object.assign({}, preset);
-        
-        // If Speed tab is active, normalize y values for speed mode
-        var currentTab = tabView.currentTab();
-        if (currentTab === 0) { // Speed tab
-            currentEasing.y1 = 0;
-            currentEasing.y2 = 1;
-        }
         
         updateTextInput();
         drawCurve();
@@ -2499,40 +2557,21 @@ drawCurve();
 syncValueToSpeed();
 drawSpeedCurve();
 
-// Add tab change handler with Y-value backup/restore
+// Add tab change handler
+// Note: Both tabs now support full Y values, so no backup/restore needed
 tabView.onTabChanged = function() {
     var currentTab = tabView.currentTab();
     console.log("Tab changed to:", currentTab);
     
     if (currentTab === 0) {
         // Switched to Speed tab
-        // Backup current Y values
-        backupYValues = {
-            y1: currentEasing.y1,
-            y2: currentEasing.y2
-        };
-        // Reset modification flag
-        speedGraphModified = false;
-        // Normalize Y values for speed mode FIRST
-        currentEasing.y1 = 0;
-        currentEasing.y2 = 1;
-        // Then sync speed handles based on normalized values
         syncValueToSpeed();
-        updateTextInput();
         drawCurve();
-        drawSpeedCurve();  // Ensure velocity curve is drawn
+        drawSpeedCurve();
     } else if (currentTab === 1) {
         // Switched to Value tab
-        // If speed graph wasn't modified, restore backup Y values
-        if (backupYValues !== null && !speedGraphModified) {
-            currentEasing.y1 = backupYValues.y1;
-            currentEasing.y2 = backupYValues.y2;
-            updateTextInput();
-        }
         drawCurve();
-        // Clear backup and reset flag
-        backupYValues = null;
-        speedGraphModified = false;
+        drawSpeedCurve();
     }
     
     // Save the selected tab preference
@@ -2544,6 +2583,34 @@ ui.setMinimumWidth(graphWidth);
 ui.setMinimumHeight(graphHeight + 60); // Add space for buttons and text input
 
 // Shift key detection now uses api.isShiftHeld() - no custom tracking needed
+
+// Handle UI resize - make graphs responsive (non-proportional)
+ui.onResize = function() {
+    var newWidth = ui.size().width;
+    var newHeight = ui.size().height;
+    
+    // Calculate new graph dimensions (leave room for controls below)
+    var controlsHeight = 90;  // Approximate height of controls below the graph
+    var margin = 10;  // Side margins
+    
+    // Width and height resize independently (non-proportional)
+    var newGraphWidth = Math.max(150, newWidth - margin);
+    var newGraphHeight = Math.max(150, newHeight - controlsHeight);
+    
+    // Update graph dimensions
+    graphWidth = newGraphWidth;
+    graphHeight = newGraphHeight;
+    speedGraphWidth = newGraphWidth;
+    speedGraphHeight = newGraphHeight;
+    
+    // Resize the canvas elements
+    graphCanvas.setSize(graphWidth, graphHeight);
+    speedGraphCanvas.setSize(speedGraphWidth, speedGraphHeight);
+    
+    // Redraw the curves with new dimensions
+    drawCurve();
+    drawSpeedCurve();
+};
 
 // Show the window
 ui.show();
