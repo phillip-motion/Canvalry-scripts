@@ -1,1 +1,10 @@
+node_modules
+dist
 .DS_Store
+.env
+.asset-cache.json
+.build-src/
+.src-original/
+build/canvalry-scripts_assets/
+build/canvalry-scripts_assets/*
+build/*unencrypted*.js

@@ -1,0 +1,12 @@
+{
+	"include": ["src/**/*"],
+	"exclude": ["node_modules"],
+	"compilerOptions": {
+		"allowJs": true,
+		"checkJs": true,
+		"noEmit": true,
+		"types": ["@scenery/cavalry-types"],
+		"esModuleInterop": true,
+		"resolveJsonModule": true
+	}
+}

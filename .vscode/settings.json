@@ -1,0 +1,11 @@
+{
+	"prettier.configPath": ".prettierrc.json",
+	"prettier.prettierPath": "./node_modules/prettier",
+	"editor.defaultFormatter": "esbenp.prettier-vscode",
+	"editor.formatOnSave": true,
+	"files.associations": {
+		"*.cv": "json",
+		"*.cvc": "json",
+		"*.pal": "json"
+	}
+}

@@ -1,0 +1,21 @@
+{
+  "name": "canvalry-scripts",
+  "displayName": "canvalry-scripts",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/build.cjs --dev",
+    "build": "node scripts/build.cjs",
+    "release": "node scripts/build.cjs --release",
+    "embed": "node scripts/embed-assets.cjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "@scenery/bundler": "^1.0.0",
+    "@scenery/cavalry-types": "^0.5.0",
+    "cross-env": "^10.1.0",
+    "dotenv": "^17.2.3",
+    "prettier": "^3.2.5"
+  }
+}
