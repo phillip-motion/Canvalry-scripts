@@ -5,6 +5,4 @@ dist
 .asset-cache.json
 .build-src/
 .src-original/
-build/canvalry-scripts_assets/
-build/canvalry-scripts_assets/*
 build/*unencrypted*.js
