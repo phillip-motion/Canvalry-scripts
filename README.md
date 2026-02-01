@@ -7,7 +7,7 @@ A collection of Cavalry scripts from Canva’s Motion Powerhouse team to speed u
   </a>
 </p>
 
-Install by copying the Canva folder to your Cavalry Scripts directory.
+Copy the scripts to your Cavalry Scripts folder.
 
 ## Easey
 
