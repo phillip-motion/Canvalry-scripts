@@ -11,7 +11,7 @@ Install by copying the Canva folder to your Cavalry Scripts directory.
 
 ## Easey
 
-#### Easey has moved! [Download the latest version here →](https://github.com/sammularczyk/easey/releases/latest)
+### Easey has moved! [Download the latest version here →](https://github.com/sammularczyk/easey/releases/latest)
 
 ## Convert Frame Rate
 <img width="312" height="230" alt="Screenshot 2025-11-05 at 21 38 38" src="https://github.com/user-attachments/assets/f14bfb71-ad9c-47d2-af95-4946a854d09e" />
