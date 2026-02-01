@@ -1,11 +1,6 @@
 # Changelog
 
-This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
-with the exception that the `major` version is used for marketing purposes,
-not to indicate breaking changes.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-
+Format:
 -   `Added` for new features
 -   `Changed` for changes in existing functionality
 -   `Deprecated` for soon-to-be removed features
@@ -15,8 +10,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [1.0.1] - 2026-01-30
 
+>
+
 ### Added
--   Localiser: easily localise your Cavalry files
+
+> [!IMPORTANT]
+> Easey has moved. [Download the latest version here](https://github.com/sammularczyk/easey/releases/tag/v1.2.0)
+
+-   Localiser: easily localise your Cavalry files using JSON or CSV
 -   Find and Replace Text: replace text across your entire file
 
 ### Changed
