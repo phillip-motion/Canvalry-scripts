@@ -29,9 +29,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAG=$(basename "${{ steps.auto-release.outputs.html_url }}")
+          echo "Uploading assets to release $TAG"
           for file in ./build/*.jsc; do
             if [ -f "$file" ]; then
               echo "Uploading $file"
-              gh release upload "${{ steps.auto-release.outputs.tag }}" "$file" --clobber
+              gh release upload "$TAG" "$file" --clobber
             fi
           done
