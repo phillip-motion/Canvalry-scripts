@@ -4,4 +4,5 @@ node_modules
 .asset-cache.json
 .build-src/
 .src-original/
+.vscode/
 build/*unencrypted*.js
