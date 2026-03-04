@@ -60,6 +60,9 @@ function swapDirectories() {
     
     // Rename src/ to .src-original/
     if (fs.existsSync(SRC_DIR)) {
+        if (fs.existsSync(SRC_ORIGINAL_DIR)) {
+            throw new Error('.src-original/ already exists — this should not happen after recovery. Aborting to protect source files.');
+        }
         fs.renameSync(SRC_DIR, SRC_ORIGINAL_DIR);
         console.log('  ✓ src/ → .src-original/');
     }
@@ -143,12 +146,34 @@ function setupExitHandler() {
 }
 
 /**
+ * Recover from a previously interrupted build.
+ * If .src-original/ exists but src/ doesn't, the last build was killed
+ * mid-swap and .src-original/ IS our real source — restore it.
+ */
+function recoverIfNeeded() {
+    if (fs.existsSync(SRC_ORIGINAL_DIR) && !fs.existsSync(SRC_DIR)) {
+        console.log('\n⚠️  Detected interrupted build — restoring src/ from .src-original/...');
+        fs.renameSync(SRC_ORIGINAL_DIR, SRC_DIR);
+        console.log('  ✓ .src-original/ → src/ (recovered)');
+    }
+    if (fs.existsSync(BUILD_SRC_DIR)) {
+        fs.rmSync(BUILD_SRC_DIR, { recursive: true, force: true });
+    }
+    if (fs.existsSync(SRC_ORIGINAL_DIR)) {
+        fs.rmSync(SRC_ORIGINAL_DIR, { recursive: true, force: true });
+    }
+}
+
+/**
  * Main build function
  */
 async function main() {
     const mode = isDev ? 'development' : 'production';
     console.log(`\n🚀 Starting ${mode} build...\n`);
     console.log('=' .repeat(50));
+    
+    // Recover from any previously interrupted build before doing anything
+    recoverIfNeeded();
     
     // Setup exit handler to restore directories on error/interrupt
     setupExitHandler();
