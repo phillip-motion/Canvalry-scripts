@@ -107,6 +107,33 @@ function lottiePathToCavalryPath(pathData, yFlip, scale, groupOffset) {
     return path;
 }
 
+// Append a Lottie sub-path to an existing cavalry.Path (for compound/multi-contour shapes).
+function appendLottiePathToCavalryPath(path, pathData, yFlip, scale, groupOffset) {
+    if (!pathData || !pathData.v || pathData.v.length === 0) return;
+    var v = pathData.v;
+    var i = pathData.i || [];
+    var o = pathData.o || [];
+    var c = pathData.c === true;
+    var mul = yFlip ? -1 : 1;
+    var sc = scale || 1;
+    var gx = groupOffset ? groupOffset[0] : 0;
+    var gy = groupOffset ? groupOffset[1] : 0;
+
+    path.moveTo(sc * (v[0][0] + gx), sc * mul * (v[0][1] + gy));
+    for (var idx = 0; idx < v.length; idx++) {
+        var next = (idx + 1) % v.length;
+        var v0 = v[idx];
+        var v1 = v[next];
+        var o0 = o[idx] || [0, 0];
+        var i1 = i[next] || [0, 0];
+        path.cubicTo(
+            sc * (v0[0] + gx + o0[0]), sc * mul * (v0[1] + gy + o0[1]),
+            sc * (v1[0] + gx + i1[0]), sc * mul * (v1[1] + gy + i1[1]),
+            sc * (v1[0] + gx),         sc * mul * (v1[1] + gy));
+    }
+    if (c && v.length > 1) path.close();
+}
+
 // Build Cavalry's internal contour format from Lottie path data.
 // This is the native editablePath2 structure that Cavalry stores internally,
 // needed because cavalry.Path objects don't serialize through api.keyframe().
@@ -271,6 +298,49 @@ function applyGradientFill(shapeId, gradInfo, scaleFactor) {
     }
 }
 
+// --- Extract stroke info from Lottie stroke item ---
+function extractStrokeInfo(stItem) {
+    if (!stItem || stItem.ty !== "st") return null;
+    var color = "#000000";
+    if (stItem.c && stItem.c.k !== undefined) {
+        var k = stItem.c.k;
+        if (Array.isArray(k) && k.length > 0 && typeof k[0] === "object" && k[0].s) k = k[0].s;
+        var r = Array.isArray(k) ? k[0] : k;
+        var g = Array.isArray(k) ? k[1] : k;
+        var b = Array.isArray(k) ? k[2] : k;
+        if (typeof r === "number" && typeof g === "number" && typeof b === "number") {
+            color = "#" + [r, g, b].map(function(x) {
+                var n = Math.round(Math.max(0, Math.min(1, x)) * 255);
+                return (n < 16 ? "0" : "") + n.toString(16);
+            }).join("");
+        }
+    }
+    var w = 2;
+    if (stItem.w) {
+        var wVal = getStaticValue(stItem.w, 2);
+        w = Array.isArray(wVal) ? wVal[0] : wVal;
+    }
+    return { color: color, width: w };
+}
+
+// --- Convert Lottie ellipse (ty:el) to path data ---
+function ellipseToPathData(elItem) {
+    var sizeVal = getStaticValue(elItem.s, [100, 100]);
+    var posVal = getStaticValue(elItem.p, [0, 0]);
+    var rx = (Array.isArray(sizeVal) ? sizeVal[0] : sizeVal) / 2;
+    var ry = (Array.isArray(sizeVal) ? sizeVal[1] : sizeVal) / 2;
+    var cx = Array.isArray(posVal) ? posVal[0] : 0;
+    var cy = Array.isArray(posVal) ? posVal[1] : 0;
+    var kx = rx * 0.5522847498;
+    var ky = ry * 0.5522847498;
+    return {
+        v: [[cx, cy - ry], [cx + rx, cy], [cx, cy + ry], [cx - rx, cy]],
+        o: [[kx, 0], [0, ky], [-kx, 0], [0, -ky]],
+        i: [[-kx, 0], [0, -ky], [kx, 0], [0, ky]],
+        c: true
+    };
+}
+
 // --- Convert Lottie rectangle (ty:rc) to path data ---
 function rectToPathData(rcItem) {
     var sizeVal = getStaticValue(rcItem.s, [100, 100]);
@@ -323,23 +393,32 @@ function extractGroupTransform(trItem) {
 
 // --- Recursively collect shapes from nested Lottie groups ---
 // Accumulates transforms (tr.p - tr.a) across nesting levels and inherits
-// fill/gradient from ancestor groups so deeply-nested shapes are found.
-function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradient, results) {
+// fill/gradient/stroke from ancestor groups so deeply-nested shapes are found.
+// Detects compound paths: when sibling sub-groups each have a path but no
+// individual fill, and a shared fill exists at this level, they are merged
+// into a single result with isCompound=true for Even-Odd rendering.
+function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradient, inheritedStroke, inheritedHasFill, results) {
     var localFill = inheritedFill;
     var localGradient = inheritedGradient;
+    var localStroke = inheritedStroke;
+    var foundFill = inheritedHasFill;
     var localShapes = [];
     var trItem = null;
 
     for (var i = 0; i < items.length; i++) {
         var item = items[i];
-        if (item.ty === "fl") localFill = extractFillColor(item);
-        if (item.ty === "gf") localGradient = extractGradientInfo(item);
+        if (item.ty === "fl") { localFill = extractFillColor(item); foundFill = true; localGradient = null; }
+        if (item.ty === "gf") { localGradient = extractGradientInfo(item); foundFill = true; }
+        if (item.ty === "st") localStroke = extractStrokeInfo(item);
         if (item.ty === "tr") trItem = item;
         if (item.ty === "sh") {
             localShapes.push({ pathData: getPathDataFromShapeKs(item.ks), pathKs: item.ks });
         }
         if (item.ty === "rc") {
             localShapes.push({ pathData: rectToPathData(item), pathKs: null });
+        }
+        if (item.ty === "el") {
+            localShapes.push({ pathData: ellipseToPathData(item), pathKs: null });
         }
     }
 
@@ -354,15 +433,75 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 pathKs: localShapes[si].pathKs,
                 fillColor: localFill,
                 gradientInfo: localGradient,
-                groupOffset: [curX, curY]
+                groupOffset: [curX, curY],
+                hasFill: foundFill,
+                strokeInfo: localStroke,
+                isCompound: false,
+                compoundPaths: null
             });
         }
     }
 
+    // Detect compound path pattern: multiple sibling sub-groups each containing
+    // a path but no individual fill, with a shared fill at this level.
+    var subGroups = [];
     for (var gi = 0; gi < items.length; gi++) {
-        if (items[gi].ty === "gr" && items[gi].it) {
-            collectShapesFromItems(items[gi].it, curX, curY, localFill, localGradient, results);
+        if (items[gi].ty === "gr" && items[gi].it) subGroups.push(items[gi]);
+    }
+
+    if (foundFill && subGroups.length > 1) {
+        var compoundParts = [];
+        var allQualify = true;
+        for (var sg = 0; sg < subGroups.length; sg++) {
+            var subItems = subGroups[sg].it;
+            var subHasFill = false;
+            var subHasPath = false;
+            var subPathData = null;
+            var subPathKs = null;
+            var subTrItem = null;
+            for (var si2 = 0; si2 < subItems.length; si2++) {
+                if (subItems[si2].ty === "fl" || subItems[si2].ty === "gf") subHasFill = true;
+                if (subItems[si2].ty === "sh") {
+                    subHasPath = true;
+                    subPathData = getPathDataFromShapeKs(subItems[si2].ks);
+                    subPathKs = subItems[si2].ks;
+                }
+                if (subItems[si2].ty === "rc") {
+                    subHasPath = true;
+                    subPathData = rectToPathData(subItems[si2]);
+                }
+                if (subItems[si2].ty === "el") {
+                    subHasPath = true;
+                    subPathData = ellipseToPathData(subItems[si2]);
+                }
+                if (subItems[si2].ty === "tr") subTrItem = subItems[si2];
+            }
+            if (subHasFill || !subHasPath) { allQualify = false; break; }
+            var subTr = extractGroupTransform(subTrItem);
+            compoundParts.push({
+                pathData: subPathData,
+                pathKs: subPathKs,
+                groupOffset: [curX + subTr.px - subTr.ax, curY + subTr.py - subTr.ay]
+            });
         }
+        if (allQualify && compoundParts.length > 1) {
+            results.push({
+                pathData: compoundParts[0].pathData,
+                pathKs: null,
+                fillColor: localFill,
+                gradientInfo: localGradient,
+                groupOffset: compoundParts[0].groupOffset,
+                hasFill: true,
+                strokeInfo: localStroke,
+                isCompound: true,
+                compoundPaths: compoundParts
+            });
+            return;
+        }
+    }
+
+    for (var gi2 = 0; gi2 < subGroups.length; gi2++) {
+        collectShapesFromItems(subGroups[gi2].it, curX, curY, localFill, localGradient, localStroke, foundFill, results);
     }
 }
 
@@ -374,7 +513,7 @@ function getAllShapesFromLayer(layer) {
     for (var s = 0; s < shapes.length; s++) {
         var gr = shapes[s];
         if (gr.ty !== "gr" || !gr.it) continue;
-        collectShapesFromItems(gr.it, 0, 0, "#ffffff", null, result);
+        collectShapesFromItems(gr.it, 0, 0, "#ffffff", null, null, false, result);
     }
     return result;
 }
@@ -791,7 +930,35 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         } else if (entry.kind === "shape") {
             var shapeList = entry.shapes;
             var targetIds = [];
-            if (shapeList.length === 1) {
+            if (shapeList.length === 1 && shapeList[0].isCompound && shapeList[0].compoundPaths) {
+                var s0c = shapeList[0];
+                var combinedPath = new cavalry.Path();
+                for (var cp = 0; cp < s0c.compoundPaths.length; cp++) {
+                    appendLottiePathToCavalryPath(combinedPath, s0c.compoundPaths[cp].pathData,
+                        yFlip, scaleFactor, s0c.compoundPaths[cp].groupOffset);
+                }
+                try {
+                    nodeId = api.createEditable(combinedPath, name);
+                } catch (e) {
+                    console.log("Lottie Importer: Could not create compound shape '" + name + "': " + e.message);
+                    continue;
+                }
+                api.setFill(nodeId, true);
+                api.set(nodeId, { "fillRule": 0 });
+                if (s0c.gradientInfo) {
+                    applyGradientFill(nodeId, s0c.gradientInfo, scaleFactor);
+                } else {
+                    api.set(nodeId, { "material.materialColor": s0c.fillColor });
+                }
+                if (s0c.strokeInfo) {
+                    api.setStroke(nodeId, true);
+                    api.set(nodeId, {
+                        "stroke.strokeColor": s0c.strokeInfo.color,
+                        "stroke.width": s0c.strokeInfo.width * scaleFactor
+                    });
+                }
+                targetIds = [nodeId];
+            } else if (shapeList.length === 1) {
                 var s0 = shapeList[0];
                 var path = lottiePathToCavalryPath(s0.pathData, yFlip, scaleFactor, s0.groupOffset);
                 if (!path) continue;
@@ -801,12 +968,23 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                     console.log("Lottie Importer: Could not create shape '" + name + "': " + e.message);
                     continue;
                 }
-                api.setFill(nodeId, true);
-                api.set(nodeId, { "fillRule": 1 });
-                if (s0.gradientInfo) {
-                    applyGradientFill(nodeId, s0.gradientInfo, scaleFactor);
+                if (s0.hasFill) {
+                    api.setFill(nodeId, true);
+                    api.set(nodeId, { "fillRule": 1 });
+                    if (s0.gradientInfo) {
+                        applyGradientFill(nodeId, s0.gradientInfo, scaleFactor);
+                    } else {
+                        api.set(nodeId, { "material.materialColor": s0.fillColor });
+                    }
                 } else {
-                    api.set(nodeId, { "material.materialColor": s0.fillColor });
+                    api.setFill(nodeId, false);
+                }
+                if (s0.strokeInfo) {
+                    api.setStroke(nodeId, true);
+                    api.set(nodeId, {
+                        "stroke.strokeColor": s0.strokeInfo.color,
+                        "stroke.width": s0.strokeInfo.width * scaleFactor
+                    });
                 }
                 animateShapePath(nodeId, s0.pathKs, yFlip, scaleFactor, s0.groupOffset, tOff);
                 targetIds = [nodeId];
@@ -819,20 +997,56 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                 }
                 for (var ss = 0; ss < shapeList.length; ss++) {
                     var s = shapeList[ss];
-                    var sp = lottiePathToCavalryPath(s.pathData, yFlip, scaleFactor, s.groupOffset);
-                    if (!sp) continue;
                     var subId;
-                    try {
-                        subId = api.createEditable(sp, name + " " + (ss + 1));
-                    } catch (e) { continue; }
-                    api.setFill(subId, true);
-                    api.set(subId, { "fillRule": 1 });
-                    if (s.gradientInfo) {
-                        applyGradientFill(subId, s.gradientInfo, scaleFactor);
+                    if (s.isCompound && s.compoundPaths) {
+                        var cPath = new cavalry.Path();
+                        for (var cp2 = 0; cp2 < s.compoundPaths.length; cp2++) {
+                            appendLottiePathToCavalryPath(cPath, s.compoundPaths[cp2].pathData,
+                                yFlip, scaleFactor, s.compoundPaths[cp2].groupOffset);
+                        }
+                        try {
+                            subId = api.createEditable(cPath, name + " " + (ss + 1));
+                        } catch (e) { continue; }
+                        api.setFill(subId, true);
+                        api.set(subId, { "fillRule": 0 });
+                        if (s.gradientInfo) {
+                            applyGradientFill(subId, s.gradientInfo, scaleFactor);
+                        } else {
+                            api.set(subId, { "material.materialColor": s.fillColor });
+                        }
+                        if (s.strokeInfo) {
+                            api.setStroke(subId, true);
+                            api.set(subId, {
+                                "stroke.strokeColor": s.strokeInfo.color,
+                                "stroke.width": s.strokeInfo.width * scaleFactor
+                            });
+                        }
                     } else {
-                        api.set(subId, { "material.materialColor": s.fillColor });
+                        var sp = lottiePathToCavalryPath(s.pathData, yFlip, scaleFactor, s.groupOffset);
+                        if (!sp) continue;
+                        try {
+                            subId = api.createEditable(sp, name + " " + (ss + 1));
+                        } catch (e) { continue; }
+                        if (s.hasFill) {
+                            api.setFill(subId, true);
+                            api.set(subId, { "fillRule": 1 });
+                            if (s.gradientInfo) {
+                                applyGradientFill(subId, s.gradientInfo, scaleFactor);
+                            } else {
+                                api.set(subId, { "material.materialColor": s.fillColor });
+                            }
+                        } else {
+                            api.setFill(subId, false);
+                        }
+                        if (s.strokeInfo) {
+                            api.setStroke(subId, true);
+                            api.set(subId, {
+                                "stroke.strokeColor": s.strokeInfo.color,
+                                "stroke.width": s.strokeInfo.width * scaleFactor
+                            });
+                        }
+                        animateShapePath(subId, s.pathKs, yFlip, scaleFactor, s.groupOffset, tOff);
                     }
-                    animateShapePath(subId, s.pathKs, yFlip, scaleFactor, s.groupOffset, tOff);
                     try { api.parent(subId, nodeId); } catch (e) {}
                     targetIds.push(subId);
                 }
