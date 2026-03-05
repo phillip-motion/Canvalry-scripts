@@ -1,6 +1,8 @@
 # Canvalry Scripts
 A collection of Cavalry scripts from Canva’s Motion Powerhouse team to speed up workflows and make great motion design.
 
+These scripts are tools created internally by Canva's motion designers, and are mostly vibe coded. They are *not supported by the Cavalry team*.
+
 <p align="center" style="margin-top:0;margin-bottom:0;">
   <a href="https://github.com/phillip-motion/canvalry-scripts/releases/latest">
     <img width="186" height="108" alt="Download" src="https://github.com/user-attachments/assets/9295a646-c7ba-4649-b069-2e78204dc1ce" />
