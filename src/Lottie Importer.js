@@ -89,7 +89,8 @@ function lottiePathToCavalryPath(pathData, yFlip, scale, groupOffset) {
     var path = new cavalry.Path();
     path.moveTo(sc * (v[0][0] + gx), sc * mul * (v[0][1] + gy));
 
-    for (var idx = 0; idx < v.length; idx++) {
+    var segCount = c ? v.length : v.length - 1;
+    for (var idx = 0; idx < segCount; idx++) {
         var next = (idx + 1) % v.length;
         var v0 = v[idx];
         var v1 = v[next];
@@ -120,7 +121,8 @@ function appendLottiePathToCavalryPath(path, pathData, yFlip, scale, groupOffset
     var gy = groupOffset ? groupOffset[1] : 0;
 
     path.moveTo(sc * (v[0][0] + gx), sc * mul * (v[0][1] + gy));
-    for (var idx = 0; idx < v.length; idx++) {
+    var segCount = c ? v.length : v.length - 1;
+    for (var idx = 0; idx < segCount; idx++) {
         var next = (idx + 1) % v.length;
         var v0 = v[idx];
         var v1 = v[next];
@@ -509,11 +511,39 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
 function getAllShapesFromLayer(layer) {
     var shapes = layer.shapes;
     if (!shapes) return [];
+    // Pre-scan for top-level fill/gradient/stroke outside groups
+    var topFill = "#ffffff";
+    var topGradient = null;
+    var topStroke = null;
+    var topHasFill = false;
+    for (var p = 0; p < shapes.length; p++) {
+        if (shapes[p].ty === "fl") { topFill = extractFillColor(shapes[p]); topHasFill = true; topGradient = null; }
+        if (shapes[p].ty === "gf") { topGradient = extractGradientInfo(shapes[p]); topHasFill = true; }
+        if (shapes[p].ty === "st") topStroke = extractStrokeInfo(shapes[p]);
+    }
     var result = [];
     for (var s = 0; s < shapes.length; s++) {
         var gr = shapes[s];
         if (gr.ty !== "gr" || !gr.it) continue;
-        collectShapesFromItems(gr.it, 0, 0, "#ffffff", null, null, false, result);
+        collectShapesFromItems(gr.it, 0, 0, topFill, topGradient, topStroke, topHasFill, result);
+    }
+    // Scan for trim path (ty=tm) at the shapes array level
+    var trimItem = null;
+    for (var t = 0; t < shapes.length; t++) {
+        if (shapes[t].ty === "tm") { trimItem = shapes[t]; break; }
+    }
+    if (trimItem) {
+        var startVal = getStaticValue(trimItem.s, 0);
+        if (Array.isArray(startVal)) startVal = startVal[0];
+        var endVal = getStaticValue(trimItem.e, 100);
+        if (Array.isArray(endVal)) endVal = endVal[0];
+        var trimInfo = {
+            start: startVal,
+            end: endVal,
+            startKs: (trimItem.s && trimItem.s.a === 1) ? trimItem.s : null,
+            endKs: (trimItem.e && trimItem.e.a === 1) ? trimItem.e : null
+        };
+        for (var ri = 0; ri < result.length; ri++) result[ri].trimInfo = trimInfo;
     }
     return result;
 }
@@ -547,10 +577,14 @@ function getLayerTransform(ks, yFlip, hasParent, compW, compH, scale) {
     var cavY = sc * (yFlip ? -py : py);
     var cavR = yFlip ? -r : r;
 
+    var oVal = getStaticValue(ks.o, 100);
+    if (Array.isArray(oVal)) oVal = oVal[0];
+
     return {
         position: [cavX, cavY],
         scale: [Array.isArray(s) ? s[0] : s, Array.isArray(s) ? s[1] : s],
-        rotation: cavR
+        rotation: cavR,
+        opacity: oVal
     };
 }
 
@@ -754,6 +788,57 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
         }
         applyLottieEasing(nodeId, "rotation.z", rotKfs, ks.r.k, 0);
     }
+
+    if (ks.o && ks.o.a === 1 && ks.o.k && ks.o.k.length > 1) {
+        var opKfs = [];
+        for (var ko = 0; ko < ks.o.k.length; ko++) {
+            var kov = ks.o.k[ko];
+            var frame = (kov.t != null ? kov.t : 0) + tOff;
+            var oRaw = kov.s !== undefined ? kov.s : kov.k;
+            var oVal = Array.isArray(oRaw) ? oRaw[0] : oRaw;
+            if (oVal == null) continue;
+            var cavO = oVal / 100;
+            try {
+                api.keyframe(nodeId, frame, { "opacity": cavO });
+                opKfs.push({ frame: frame, value: cavO });
+            } catch (e) {}
+        }
+        applyLottieEasing(nodeId, "opacity", opKfs, ks.o.k, 0);
+    }
+}
+
+// --- Keyframe a single numeric Lottie property ---
+function keyframeSingleValue(nodeId, attrName, ks, timeOffset) {
+    if (!ks || ks.a !== 1 || !ks.k || ks.k.length <= 1) return;
+    var tOff = timeOffset || 0;
+    var kfs = [];
+    for (var ki = 0; ki < ks.k.length; ki++) {
+        var kv = ks.k[ki];
+        var frame = (kv.t != null ? kv.t : 0) + tOff;
+        var val = kv.s !== undefined ? kv.s : kv.k;
+        if (Array.isArray(val)) val = val[0];
+        if (val === undefined) continue;
+        var obj = {};
+        obj[attrName] = val;
+        try {
+            api.keyframe(nodeId, frame, obj);
+            kfs.push({ frame: frame, value: val });
+        } catch (e) {}
+    }
+    applyLottieEasing(nodeId, attrName, kfs, ks.k, 0);
+}
+
+// --- Apply trim path properties to a shape node ---
+function applyTrimPath(nodeId, trimInfo, tOff) {
+    if (!trimInfo) return;
+    api.setStroke(nodeId, true);
+    api.set(nodeId, {
+        "stroke.trim": 1,
+        "stroke.trimStart": trimInfo.start,
+        "stroke.trimEnd": trimInfo.end
+    });
+    if (trimInfo.startKs) keyframeSingleValue(nodeId, "stroke.trimStart", trimInfo.startKs, tOff);
+    if (trimInfo.endKs) keyframeSingleValue(nodeId, "stroke.trimEnd", trimInfo.endKs, tOff);
 }
 
 // --- Animate shape path keyframes ---
@@ -818,17 +903,27 @@ function applyMasks(layer, targetIds, yFlip, scaleFactor, nodeId, timeOffset) {
             try {
                 api.connect(maskId, "id", targetIds[t], "masks." + m + ".id");
                 maskConnected = true;
-            } catch (e) {}
+            } catch (e) {
+                console.log("Lottie Importer: masks." + m + ".id connect err: " + e.message);
+            }
+            if (!maskConnected) {
+                try {
+                    api.connect(maskId, "id", targetIds[t], "masks." + m + ".id", true);
+                    maskConnected = true;
+                } catch (e2) {
+                    console.log("Lottie Importer: masks." + m + ".id (forced) err: " + e2.message);
+                }
+            }
             if (!maskConnected) {
                 try {
                     api.connect(maskId, "id", targetIds[t], "masks");
                     maskConnected = true;
-                } catch (e2) {}
+                } catch (e3) {
+                    console.log("Lottie Importer: masks append err: " + e3.message);
+                }
             }
             if (maskConnected) {
                 console.log("Lottie Importer: Connected mask " + m + " (mode: " + mask.mode + ") to " + targetIds[t]);
-            } else {
-                console.log("Lottie Importer: Mask " + m + " connect failed for " + targetIds[t] + " (mode: " + mask.mode + ")");
             }
         }
     }
@@ -863,6 +958,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
     }
 
     var idByInd = {};
+    var targetIdsByInd = {};
     var createdIds = [];
     var createdLayers = [];
 
@@ -920,6 +1016,8 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             if (childSt !== 0) {
                 try { api.offsetLayerTime(nodeId, childSt); } catch (e) {}
             }
+            applyMasks(layer, [nodeId], yFlip, scaleFactor, nodeId, tOff);
+            targetIdsByInd[layer.ind] = [nodeId];
         } else if (entry.kind === "null") {
             try {
                 nodeId = createGroup(name);
@@ -957,6 +1055,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                         "stroke.width": s0c.strokeInfo.width * scaleFactor
                     });
                 }
+                applyTrimPath(nodeId, s0c.trimInfo, tOff);
                 targetIds = [nodeId];
             } else if (shapeList.length === 1) {
                 var s0 = shapeList[0];
@@ -986,6 +1085,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                         "stroke.width": s0.strokeInfo.width * scaleFactor
                     });
                 }
+                applyTrimPath(nodeId, s0.trimInfo, tOff);
                 animateShapePath(nodeId, s0.pathKs, yFlip, scaleFactor, s0.groupOffset, tOff);
                 targetIds = [nodeId];
             } else {
@@ -995,7 +1095,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                     console.log("Lottie Importer: Could not create group '" + name + "': " + e.message);
                     continue;
                 }
-                for (var ss = 0; ss < shapeList.length; ss++) {
+                for (var ss = shapeList.length - 1; ss >= 0; ss--) {
                     var s = shapeList[ss];
                     var subId;
                     if (s.isCompound && s.compoundPaths) {
@@ -1021,6 +1121,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                                 "stroke.width": s.strokeInfo.width * scaleFactor
                             });
                         }
+                        applyTrimPath(subId, s.trimInfo, tOff);
                     } else {
                         var sp = lottiePathToCavalryPath(s.pathData, yFlip, scaleFactor, s.groupOffset);
                         if (!sp) continue;
@@ -1045,6 +1146,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                                 "stroke.width": s.strokeInfo.width * scaleFactor
                             });
                         }
+                        applyTrimPath(subId, s.trimInfo, tOff);
                         animateShapePath(subId, s.pathKs, yFlip, scaleFactor, s.groupOffset, tOff);
                     }
                     try { api.parent(subId, nodeId); } catch (e) {}
@@ -1052,6 +1154,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                 }
             }
             applyMasks(layer, targetIds, yFlip, scaleFactor, nodeId, tOff);
+            targetIdsByInd[layer.ind] = targetIds;
         } else {
             continue;
         }
@@ -1086,6 +1189,67 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         }
     }
 
+    // Pass 2b: Track mattes (td/tt/tp)
+    // td=1 marks a matte source; tt on the matted layer selects the matte type;
+    // tp points to the matte source's ind.
+    for (var tm = 0; tm < layers.length; tm++) {
+        var matted = layers[tm];
+        if (!matted.tt) continue;
+        var matteInd = matted.tp;
+        if (matteInd == null) {
+            for (var mp = tm - 1; mp >= 0; mp--) {
+                if (layers[mp].td === 1) { matteInd = layers[mp].ind; break; }
+            }
+        }
+        if (matteInd == null) continue;
+        var matteId = idByInd[matteInd];
+        if (!matteId) {
+            console.log("Lottie Importer: Track matte source ind=" + matteInd + " not found in idByInd");
+            continue;
+        }
+        var mattedTargets = targetIdsByInd[matted.ind];
+        if (!mattedTargets || mattedTargets.length === 0) {
+            var fallback = idByInd[matted.ind];
+            if (fallback) mattedTargets = [fallback];
+        }
+        if (!mattedTargets) {
+            console.log("Lottie Importer: Track matte target ind=" + matted.ind + " not found");
+            continue;
+        }
+        try { api.set(matteId, { "hidden": true }); }
+        catch (e) { console.log("Lottie Importer: Could not hide matte " + matteId + ": " + e.message); }
+        for (var mt = 0; mt < mattedTargets.length; mt++) {
+            var connected = false;
+            try {
+                api.connect(matteId, "id", mattedTargets[mt], "masks.0.id");
+                connected = true;
+            } catch (e) {
+                console.log("Lottie Importer: Track matte masks.0.id err: " + e.message);
+            }
+            if (!connected) {
+                try {
+                    api.connect(matteId, "id", mattedTargets[mt], "masks.0.id", true);
+                    connected = true;
+                } catch (e2) {
+                    console.log("Lottie Importer: Track matte masks.0.id (forced) err: " + e2.message);
+                }
+            }
+            if (!connected) {
+                try {
+                    api.connect(matteId, "id", mattedTargets[mt], "masks");
+                    connected = true;
+                } catch (e3) {
+                    console.log("Lottie Importer: Track matte masks append err: " + e3.message);
+                }
+            }
+            if (connected) {
+                console.log("Lottie Importer: Connected track matte " + matteId + " -> " + mattedTargets[mt]);
+            } else {
+                console.log("Lottie Importer: All track matte connect attempts failed for " + mattedTargets[mt]);
+            }
+        }
+    }
+
     // Pass 3: Transforms
     for (var ti = 0; ti < createdLayers.length; ti++) {
         var entry = createdLayers[ti];
@@ -1111,12 +1275,16 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             precompDims = { w: entry.precompW, h: entry.precompH };
         }
 
-        api.set(tId, {
+        var setProps = {
             "position": transform.position,
             "rotation.z": transform.rotation,
             "scale.x": transform.scale[0] / 100,
             "scale.y": transform.scale[1] / 100
-        });
+        };
+        if (transform.opacity != null && transform.opacity < 100) {
+            setProps["opacity"] = transform.opacity / 100;
+        }
+        api.set(tId, setProps);
         keyframeAnimatedTransforms(tId, tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor, tOff, precompDims);
     }
 
