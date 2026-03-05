@@ -234,6 +234,8 @@ function extractFillColor(flItem) {
     return "#ffffff";
 }
 
+var gradientCache = {};
+
 // --- Extract gradient fill info from Lottie gf item ---
 function extractGradientInfo(gfItem) {
     if (!gfItem || gfItem.ty !== "gf") return null;
@@ -266,35 +268,55 @@ function extractGradientInfo(gfItem) {
     return { type: type, startPt: startPt, endPt: endPt, stops: stops };
 }
 
+function gradientCacheKey(gradInfo) {
+    var parts = [gradInfo.type, gradInfo.startPt[0], gradInfo.startPt[1], gradInfo.endPt[0], gradInfo.endPt[1]];
+    for (var i = 0; i < gradInfo.stops.length; i++) {
+        parts.push(gradInfo.stops[i].position, gradInfo.stops[i].color);
+    }
+    return parts.join("|");
+}
+
 function applyGradientFill(shapeId, gradInfo, scaleFactor) {
     if (!gradInfo || !gradInfo.stops || gradInfo.stops.length < 2) return;
     try {
-        var gradientId = api.create("gradientShader", "Gradient");
-        var genType = gradInfo.type === 2 ? "radialGradientShader" : "linearGradientShader";
-        try {
-            api.set(gradientId, { "generator": genType });
-        } catch (e) {
-            api.set(gradientId, { "generator": "linearGradientShader" });
+        var cacheKey = gradientCacheKey(gradInfo);
+        var gradientId = gradientCache[cacheKey];
+
+        if (!gradientId) {
+            var typeName = gradInfo.type === 2 ? "Radial" : "Linear";
+            var firstColor = gradInfo.stops[0].color.toUpperCase();
+            var lastColor = gradInfo.stops[gradInfo.stops.length - 1].color.toUpperCase();
+            var gradLabel = typeName + " Gradient " + firstColor + " -> " + lastColor;
+            gradientId = api.create("gradientShader", gradLabel);
+            var genType = gradInfo.type === 2 ? "radialGradientShader" : "linearGradientShader";
+            try {
+                api.set(gradientId, { "generator": genType });
+            } catch (e) {
+                api.set(gradientId, { "generator": "linearGradientShader" });
+            }
+
+            var colors = [];
+            for (var ci = 0; ci < gradInfo.stops.length; ci++) colors.push(gradInfo.stops[ci].color);
+            api.setGradientFromColors(gradientId, "generator.gradient", colors);
+
+            for (var pi = 0; pi < gradInfo.stops.length; pi++) {
+                var posObj = {};
+                posObj["generator.gradient." + pi + ".position"] = gradInfo.stops[pi].position;
+                api.set(gradientId, posObj);
+            }
+
+            if (gradInfo.type !== 2) {
+                var dx = gradInfo.endPt[0] - gradInfo.startPt[0];
+                var dy = gradInfo.endPt[1] - gradInfo.startPt[1];
+                var angleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
+                api.set(gradientId, { "generator.rotation": angleDeg - 180 });
+            }
+
+            gradientCache[cacheKey] = gradientId;
         }
 
-        var colors = [];
-        for (var ci = 0; ci < gradInfo.stops.length; ci++) colors.push(gradInfo.stops[ci].color);
-        api.setGradientFromColors(gradientId, "generator.gradient", colors);
-
-        for (var pi = 0; pi < gradInfo.stops.length; pi++) {
-            var posObj = {};
-            posObj["generator.gradient." + pi + ".position"] = gradInfo.stops[pi].position;
-            api.set(gradientId, posObj);
-        }
-
-        if (gradInfo.type !== 2) {
-            var dx = gradInfo.endPt[0] - gradInfo.startPt[0];
-            var dy = gradInfo.endPt[1] - gradInfo.startPt[1];
-            var angleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
-            api.set(gradientId, { "generator.rotation": angleDeg - 180 });
-        }
-
-        api.connect(gradientId, "id", shapeId, "material", true);
+        api.addArrayIndex(shapeId, "material.colorShaders");
+        api.connect(gradientId, "id", shapeId, "material.colorShaders.0.shader");
     } catch (e) {
         console.log("Lottie Importer: Could not apply gradient: " + e.message);
     }
@@ -550,7 +572,9 @@ function getAllShapesFromLayer(layer) {
 
 // --- Layer transform from Lottie ks (p, a, s, r) ---
 // AE transform chain: translate(pos) * rotate(rot) * scale(s) * translate(-anchor)
-// Cavalry has no anchor, so bake anchor into position using scale=100%.
+// Cavalry has no anchor, so bake anchor into position:
+//   cavPos = pos - anchor * (layerScale / 100)
+// The anchor offset is scaled because AE applies translate(-anchor) BEFORE scale.
 // When scale is animated, keyframeAnimatedTransforms adds compensating
 // position keyframes so the anchor pivot stays correct across time.
 function getLayerTransform(ks, yFlip, hasParent, compW, compH, scale) {
@@ -565,9 +589,10 @@ function getLayerTransform(ks, yFlip, hasParent, compW, compH, scale) {
     var r = Array.isArray(rVal) ? rVal[0] : rVal;
     var sc = scale || 1;
 
-    // Always use scale=1 for anchor baking — gives correct position at 100%.
-    var px = p[0] - a[0];
-    var py = p[1] - a[1];
+    var lsx = (Array.isArray(s) ? s[0] : s) / 100;
+    var lsy = (Array.isArray(s) ? s[1] : s) / 100;
+    var px = p[0] - a[0] * lsx;
+    var py = p[1] - a[1] * lsy;
 
     if (!hasParent) {
         px -= compW / 2;
@@ -655,7 +680,10 @@ function applyLottieEasing(nodeId, attr, cavalryKfs, lottieKfs, component) {
 // precompDims: optional {w, h} for compositionReference layers. When provided,
 // the anchor used for scale-position compensation is shifted by [-w/2, -h/2]
 // so the precomp center tracks correctly as scale changes.
-function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, scaleFactor, timeOffset, precompDims) {
+// parentPrecompDims: optional {w, h} when the layer is parented to a
+// compositionReference — adds the parent comp center to centX/centY so
+// position keyframes are correctly relative to the parent comp center.
+function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, scaleFactor, timeOffset, precompDims, parentPrecompDims) {
     if (!ks) return;
     var tOff = timeOffset || 0;
     var sc = scaleFactor || 1;
@@ -666,7 +694,16 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
     var ay = precompDims ? (rawAy - precompDims.h / 2) : rawAy;
     var centX = hasParent ? 0 : compW / 2;
     var centY = hasParent ? 0 : compH / 2;
+    if (parentPrecompDims) {
+        centX += parentPrecompDims.w / 2;
+        centY += parentPrecompDims.h / 2;
+    }
     var posAnimated = false;
+
+    // Static scale for anchor baking in position keyframes
+    var sStatic = getStaticValue(ks.s, [100, 100, 100]);
+    var sSx = (Array.isArray(sStatic) ? sStatic[0] : sStatic) / 100;
+    var sSy = (Array.isArray(sStatic) ? sStatic[1] : sStatic) / 100;
 
     // Get static position for anchor-scale compensation
     var sp = getSplitPosition(ks);
@@ -686,7 +723,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
                 var frame = (kpx.t != null ? kpx.t : 0) + tOff;
                 var vx = Array.isArray(kpx.s) ? kpx.s[0] : kpx.s;
                 if (vx == null) continue;
-                var px = sc * (vx - ax - centX);
+                var px = sc * (vx - ax * sSx - centX);
                 try {
                     api.keyframe(nodeId, frame, { "position.x": px });
                     pxKfs.push({ frame: frame, value: px });
@@ -702,7 +739,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
                 var frame = (kpy.t != null ? kpy.t : 0) + tOff;
                 var vy = Array.isArray(kpy.s) ? kpy.s[0] : kpy.s;
                 if (vy == null) continue;
-                var py = sc * (yFlip ? -(vy - ay - centY) : (vy - ay - centY));
+                var py = sc * (yFlip ? -(vy - ay * sSy - centY) : (vy - ay * sSy - centY));
                 try {
                     api.keyframe(nodeId, frame, { "position.y": py });
                     pyKfs.push({ frame: frame, value: py });
@@ -719,8 +756,8 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
             var frame = (kpv.t != null ? kpv.t : 0) + tOff;
             var v = kpv.s || kpv.k;
             if (!Array.isArray(v)) continue;
-            var px = sc * (v[0] - ax - centX);
-            var py = sc * (yFlip ? -(v[1] - ay - centY) : (v[1] - ay - centY));
+            var px = sc * (v[0] - ax * sSx - centX);
+            var py = sc * (yFlip ? -(v[1] - ay * sSy - centY) : (v[1] - ay * sSy - centY));
             try {
                 api.keyframe(nodeId, frame, { "position.x": px, "position.y": py });
                 posXKfs.push({ frame: frame, value: px });
@@ -736,9 +773,8 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
         var scaleYKfs = [];
 
         // When scale is animated and anchor is non-zero, the position must
-        // compensate: effectivePos = pos - anchor * (scale/100). Since the
-        // static position was baked with scale=1, we keyframe position at
-        // each scale keyframe to maintain the correct anchor pivot.
+        // compensate: effectivePos = pos - anchor * (scale/100). Keyframe
+        // position at each scale keyframe to maintain the correct anchor pivot.
         var needsAnchorComp = !posAnimated && (Math.abs(ax) > 0.001 || Math.abs(ay) > 0.001);
         var compPosXKfs = [];
         var compPosYKfs = [];
@@ -954,30 +990,24 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         }
     }
 
-    // Reorder null entries so groups stack correctly when children interleave.
-    // In AE, render order is flat (by layer index) regardless of parenting.
-    // In Cavalry, children render within their parent's stack position. Sort
-    // null groups by the maximum child index so the group whose children sit
-    // deepest in the Lottie stack renders at the bottom in Cavalry.
-    var nullEntries = [];
-    var nullPositions = [];
-    for (var ni = 0; ni < processLayers.length; ni++) {
-        if (processLayers[ni].kind === "null") {
-            var nullInd = processLayers[ni].layer.ind;
-            var maxChildIdx = -1;
-            for (var ci = 0; ci < layers.length; ci++) {
-                if (layers[ci].parent === nullInd) {
-                    maxChildIdx = Math.max(maxChildIdx, ci);
-                }
+    // Relocate each null group to the position of its topmost child in
+    // processLayers. AE render order is flat; Cavalry's is hierarchical —
+    // children render at their parent group's stack position. Moving the
+    // group above its first child ensures correct z-ordering after parenting.
+    for (var ni = processLayers.length - 1; ni >= 0; ni--) {
+        if (processLayers[ni].kind !== "null") continue;
+        var nullInd = processLayers[ni].layer.ind;
+        var firstChildPos = -1;
+        for (var ci = 0; ci < processLayers.length; ci++) {
+            if (ci === ni) continue;
+            if (processLayers[ci].layer.parent === nullInd) {
+                firstChildPos = ci;
+                break;
             }
-            nullEntries.push({ entry: processLayers[ni], maxChildIdx: maxChildIdx });
-            nullPositions.push(ni);
         }
-    }
-    if (nullEntries.length > 1) {
-        nullEntries.sort(function (a, b) { return a.maxChildIdx - b.maxChildIdx; });
-        for (var ri = 0; ri < nullEntries.length; ri++) {
-            processLayers[nullPositions[ri]] = nullEntries[ri].entry;
+        if (firstChildPos !== -1 && firstChildPos < ni) {
+            var nullEntry = processLayers.splice(ni, 1)[0];
+            processLayers.splice(firstChildPos, 0, nullEntry);
         }
     }
 
@@ -1192,6 +1222,12 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         if (layer.op != null) api.setOutFrame(nodeId, layer.op + tOff);
     }
 
+    // Build ind→layer lookup for frame-range expansion below
+    var layerByInd = {};
+    for (var li = 0; li < layers.length; li++) {
+        layerByInd[layers[li].ind] = layers[li];
+    }
+
     // Pass 2: Parenting (backward — api.parent prepends, so last-to-first
     // preserves Lottie's top-to-bottom stacking among siblings)
     for (var j = layers.length - 1; j >= 0; j--) {
@@ -1202,6 +1238,17 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         if (childId && parentId && childId !== parentId) {
             try { api.parent(childId, parentId); }
             catch (e) { console.log("Lottie Importer: Could not parent '" + (l.nm || l.ind) + "': " + e.message); }
+
+            // In AE, a parent's transform applies even when the parent is
+            // outside its in/out range. Cavalry hides children of inactive
+            // parents, so expand the parent's frame range to cover children.
+            var pLayer = layerByInd[l.parent];
+            if (pLayer && l.ip != null && pLayer.ip != null && l.ip < pLayer.ip) {
+                try { api.setInFrame(parentId, l.ip + tOff); pLayer.ip = l.ip; } catch (e) {}
+            }
+            if (pLayer && l.op != null && pLayer.op != null && l.op > pLayer.op) {
+                try { api.setOutFrame(parentId, l.op + tOff); pLayer.op = l.op; } catch (e) {}
+            }
         }
     }
     if (groupId) {
@@ -1261,6 +1308,15 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         }
     }
 
+    // Build precomp-dimension lookup so children parented to a
+    // compositionReference can subtract the parent comp center.
+    var precompDimsByInd = {};
+    for (var pdi = 0; pdi < layers.length; pdi++) {
+        if (layers[pdi].ty === 0 && (layers[pdi].w || layers[pdi].h)) {
+            precompDimsByInd[layers[pdi].ind] = { w: layers[pdi].w || 0, h: layers[pdi].h || 0 };
+        }
+    }
+
     // Pass 3: Transforms
     for (var ti = 0; ti < createdLayers.length; ti++) {
         var entry = createdLayers[ti];
@@ -1270,19 +1326,26 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         var hasParent = groupId ? true : (tLayer.parent != null);
         var transform = getLayerTransform(tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor);
 
+        // In Cavalry, children of a compositionReference are positioned
+        // relative to the comp center. In AE, child positions are in the
+        // parent's layer space (origin at top-left). Subtract the parent
+        // comp center to align coordinate systems.
+        var parentPCD = (tLayer.parent != null) ? precompDimsByInd[tLayer.parent] : null;
+        if (parentPCD) {
+            transform.position[0] -= scaleFactor * (parentPCD.w / 2);
+            transform.position[1] += scaleFactor * (parentPCD.h / 2);
+        }
+
         // Cavalry compositionReferences are positioned by their center.
-        // getLayerTransform bakes position as (pos - anchor). For precomps the
-        // correct center is: position + Scale * ([w/2, h/2] - anchor).
-        // Delta vs current = ((w/2 - ax)*sx + ax) for X, -((h/2 - ay)*sy + ay) for Y.
+        // getLayerTransform bakes position as (pos - anchor * scale/100).
+        // For precomps the correct center is: pos + Scale * ([w/2, h/2] - anchor).
+        // Delta from current baked pos: scaleFactor * (w/2 * sx) for X.
         var precompDims = null;
         if (entry.kind === "precomp" && entry.precompW && entry.precompH) {
-            var aPC = getStaticValue(tLayer.ks.a, [0, 0, 0]);
-            var pcAx = Array.isArray(aPC) ? aPC[0] : 0;
-            var pcAy = Array.isArray(aPC) ? aPC[1] : 0;
             var lsx = transform.scale[0] / 100;
             var lsy = transform.scale[1] / 100;
-            transform.position[0] += scaleFactor * ((entry.precompW / 2 - pcAx) * lsx + pcAx);
-            transform.position[1] -= scaleFactor * ((entry.precompH / 2 - pcAy) * lsy + pcAy);
+            transform.position[0] += scaleFactor * (entry.precompW / 2 * lsx);
+            transform.position[1] -= scaleFactor * (entry.precompH / 2 * lsy);
             precompDims = { w: entry.precompW, h: entry.precompH };
         }
 
@@ -1296,13 +1359,14 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             setProps["opacity"] = transform.opacity;
         }
         api.set(tId, setProps);
-        keyframeAnimatedTransforms(tId, tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor, tOff, precompDims);
+        keyframeAnimatedTransforms(tId, tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor, tOff, precompDims, parentPCD);
     }
 
     return createdIds;
 }
 
 function importLottie(lottie) {
+    gradientCache = {};
     var compInfo = getCompInfo(lottie);
     var yFlip = true;
 
@@ -1332,6 +1396,22 @@ function importLottie(lottie) {
 
     var precompCache = {};
     var allCreatedIds = importLayerSet(rootLayers, assets, yFlip, scaleFactor, compInfo.w, compInfo.h, null, 0, precompCache, compInfo.fr);
+
+    var precompIds = [];
+    for (var key in precompCache) {
+        if (precompCache.hasOwnProperty(key)) precompIds.push(precompCache[key]);
+    }
+    if (precompIds.length > 0) {
+        try {
+            var groupName = lottie.nm || "Lottie Precomps";
+            var assetGroupId = api.createAssetGroup(groupName);
+            for (var gi = 0; gi < precompIds.length; gi++) {
+                api.parent(precompIds[gi], assetGroupId);
+            }
+        } catch (e) {
+            console.log("Lottie Importer: Could not create asset group for precomps: " + e.message);
+        }
+    }
 
     if (allCreatedIds.length === 0) throw new Error("No shape layers found in this Lottie.");
     api.select(allCreatedIds);
