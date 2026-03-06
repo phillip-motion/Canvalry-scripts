@@ -574,6 +574,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
     var localOpAmount = null;
     var localPolyStars = [];
 
+    var localFillRule = null;
+
     for (var i = 0; i < items.length; i++) {
         var item = items[i];
         if (item.hd === true) continue;
@@ -584,6 +586,7 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             localFillOpacityKs = (item.o && item.o.a === 1) ? item.o : null;
             foundFill = true;
             localGradient = null;
+            if (item.r != null) localFillRule = item.r;
         }
         if (item.ty === "gf") { localGradient = extractGradientInfo(item); foundFill = true; }
         if (item.ty === "gs") {
@@ -648,22 +651,33 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
     var newR = ar + tr.r;
     var newO = ao * (tr.opacity / 100);
 
-    for (var si = 0; si < localShapes.length; si++) {
-        if (localShapes[si].pathData) {
-            var pd = localShapes[si].pathData;
-            if (Math.abs(newSX - 100) > 0.01 || Math.abs(newSY - 100) > 0.01 || Math.abs(newR) > 0.001) {
-                pd = transformPathData(pd, newSX, newSY, newR);
+    if (localShapes.length > 1 && foundFill) {
+        var compParts = [];
+        for (var si = 0; si < localShapes.length; si++) {
+            if (localShapes[si].pathData) {
+                var pd = localShapes[si].pathData;
+                if (Math.abs(newSX - 100) > 0.01 || Math.abs(newSY - 100) > 0.01 || Math.abs(newR) > 0.001) {
+                    pd = transformPathData(pd, newSX, newSY, newR);
+                }
+                compParts.push({
+                    pathData: pd,
+                    pathKs: localShapes[si].pathKs,
+                    groupOffset: [curX, curY]
+                });
             }
+        }
+        if (compParts.length > 1) {
             results.push({
-                pathData: pd,
-                pathKs: localShapes[si].pathKs,
+                pathData: compParts[0].pathData,
+                pathKs: null,
                 fillColor: localFill,
                 gradientInfo: localGradient,
-                groupOffset: [curX, curY],
-                hasFill: foundFill,
+                groupOffset: compParts[0].groupOffset,
+                hasFill: true,
                 strokeInfo: localStroke,
-                isCompound: false,
-                compoundPaths: null,
+                isCompound: true,
+                compoundPaths: compParts,
+                lottieFillRule: localFillRule,
                 groupOpacity: newO,
                 fillOpacity: localFillOpacity,
                 fillColorKs: localFillColorKs,
@@ -673,6 +687,56 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 groupScaleX: newSX,
                 groupScaleY: newSY
             });
+        } else if (compParts.length === 1) {
+            results.push({
+                pathData: compParts[0].pathData,
+                pathKs: localShapes[0].pathKs,
+                fillColor: localFill,
+                gradientInfo: localGradient,
+                groupOffset: compParts[0].groupOffset,
+                hasFill: foundFill,
+                strokeInfo: localStroke,
+                isCompound: false,
+                compoundPaths: null,
+                lottieFillRule: localFillRule,
+                groupOpacity: newO,
+                fillOpacity: localFillOpacity,
+                fillColorKs: localFillColorKs,
+                fillOpacityKs: localFillOpacityKs,
+                rdValue: localRdValue,
+                opAmount: localOpAmount,
+                groupScaleX: newSX,
+                groupScaleY: newSY
+            });
+        }
+    } else {
+        for (var si = 0; si < localShapes.length; si++) {
+            if (localShapes[si].pathData) {
+                var pd = localShapes[si].pathData;
+                if (Math.abs(newSX - 100) > 0.01 || Math.abs(newSY - 100) > 0.01 || Math.abs(newR) > 0.001) {
+                    pd = transformPathData(pd, newSX, newSY, newR);
+                }
+                results.push({
+                    pathData: pd,
+                    pathKs: localShapes[si].pathKs,
+                    fillColor: localFill,
+                    gradientInfo: localGradient,
+                    groupOffset: [curX, curY],
+                    hasFill: foundFill,
+                    strokeInfo: localStroke,
+                    isCompound: false,
+                    compoundPaths: null,
+                    lottieFillRule: localFillRule,
+                    groupOpacity: newO,
+                    fillOpacity: localFillOpacity,
+                    fillColorKs: localFillColorKs,
+                    fillOpacityKs: localFillOpacityKs,
+                    rdValue: localRdValue,
+                    opAmount: localOpAmount,
+                    groupScaleX: newSX,
+                    groupScaleY: newSY
+                });
+            }
         }
     }
 
@@ -687,6 +751,7 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             strokeInfo: localStroke,
             isCompound: false,
             compoundPaths: null,
+            lottieFillRule: localFillRule,
             groupOpacity: newO,
             fillOpacity: localFillOpacity,
             fillColorKs: localFillColorKs,
@@ -794,6 +859,7 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 strokeInfo: localStroke,
                 isCompound: true,
                 compoundPaths: compoundParts,
+                lottieFillRule: localFillRule,
                 groupOpacity: newO,
                 fillOpacity: localFillOpacity,
                 fillColorKs: localFillColorKs,
@@ -1342,9 +1408,6 @@ function applyStrokeProperties(nodeId, strokeInfo, scaleFactor) {
     if (strokeInfo.lineJoin && joinMap[strokeInfo.lineJoin] !== undefined) {
         props["stroke.joinStyle"] = joinMap[strokeInfo.lineJoin];
     }
-    if (strokeInfo.miterLimit) {
-        props["stroke.miterLimit"] = strokeInfo.miterLimit;
-    }
     try { api.set(nodeId, props); } catch (e) {}
     if (strokeInfo.dashes) {
         var dashVal = 0, gapVal = 0, offsetVal = 0;
@@ -1407,10 +1470,16 @@ function createPolyStar(psItem, name, yFlip, scaleFactor, groupOffset, compW, co
 }
 
 // --- Apply fill/stroke/opacity to a shape from collected shape data ---
+function lottieFillRuleToCavalry(lottieFillRule, isCompound) {
+    if (lottieFillRule === 2) return 0;
+    if (lottieFillRule === 1) return 1;
+    return isCompound ? 0 : 1;
+}
+
 function applyShapeStyle(nodeId, shapeData, scaleFactor, tOff) {
     if (shapeData.hasFill) {
         api.setFill(nodeId, true);
-        api.set(nodeId, { "fillRule": shapeData.isCompound ? 0 : 1 });
+        api.set(nodeId, { "fillRule": lottieFillRuleToCavalry(shapeData.lottieFillRule, shapeData.isCompound) });
         if (shapeData.gradientInfo) {
             applyGradientFill(nodeId, shapeData.gradientInfo, scaleFactor);
         } else {
@@ -1631,7 +1700,10 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
     // processLayers. AE render order is flat; Cavalry's is hierarchical —
     // children render at their parent group's stack position. Moving the
     // group above its first child ensures correct z-ordering after parenting.
-    for (var ni = processLayers.length - 1; ni >= 0; ni--) {
+    // Two-pass approach: collect all relocations first, then apply them
+    // to avoid index-shifting bugs from in-place splicing.
+    var nullRelocations = [];
+    for (var ni = 0; ni < processLayers.length; ni++) {
         if (processLayers[ni].kind !== "null") continue;
         var nullInd = processLayers[ni].layer.ind;
         var firstChildPos = -1;
@@ -1643,10 +1715,98 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             }
         }
         if (firstChildPos !== -1 && firstChildPos < ni) {
-            var nullEntry = processLayers.splice(ni, 1)[0];
-            processLayers.splice(firstChildPos, 0, nullEntry);
+            nullRelocations.push({ fromIdx: ni, toIdx: firstChildPos });
         }
     }
+    if (nullRelocations.length > 0) {
+        nullRelocations.sort(function(a, b) { return b.fromIdx - a.fromIdx; });
+        var extracted = [];
+        for (var ri = 0; ri < nullRelocations.length; ri++) {
+            extracted.push({ entry: processLayers.splice(nullRelocations[ri].fromIdx, 1)[0], toIdx: nullRelocations[ri].toIdx });
+        }
+        extracted.sort(function(a, b) { return a.toIdx - b.toIdx; });
+        for (var ri2 = 0; ri2 < extracted.length; ri2++) {
+            processLayers.splice(extracted[ri2].toIdx + ri2, 0, extracted[ri2].entry);
+        }
+    }
+
+    // Contiguity analysis: detect parents whose children are non-contiguous
+    // in z-order and insert proxy group entries for each additional block.
+    var childToProxyBlock = {};
+    var proxyParentInds = {};
+    (function() {
+        var childrenByParent = {};
+        for (var pi = 0; pi < processLayers.length; pi++) {
+            var pInd = processLayers[pi].layer.parent;
+            if (pInd == null) continue;
+            if (!childrenByParent[pInd]) childrenByParent[pInd] = [];
+            childrenByParent[pInd].push(pi);
+        }
+        var proxyInserts = [];
+        for (var pKey in childrenByParent) {
+            if (!childrenByParent.hasOwnProperty(pKey)) continue;
+            var positions = childrenByParent[pKey];
+            if (positions.length <= 1) continue;
+            var blocks = [[positions[0]]];
+            for (var bi = 1; bi < positions.length; bi++) {
+                if (positions[bi] === positions[bi - 1] + 1) {
+                    blocks[blocks.length - 1].push(positions[bi]);
+                } else {
+                    var gap = false;
+                    for (var gi = positions[bi - 1] + 1; gi < positions[bi]; gi++) {
+                        var gLayer = processLayers[gi].layer;
+                        if (gLayer.parent != parseInt(pKey, 10) && processLayers[gi].kind !== "proxy") {
+                            gap = true; break;
+                        }
+                    }
+                    if (gap) {
+                        blocks.push([positions[bi]]);
+                    } else {
+                        blocks[blocks.length - 1].push(positions[bi]);
+                    }
+                }
+            }
+            if (blocks.length <= 1) continue;
+            proxyParentInds[pKey] = true;
+            var parentLayer = null;
+            for (var fi = 0; fi < processLayers.length; fi++) {
+                if (processLayers[fi].layer.ind === parseInt(pKey, 10)) {
+                    parentLayer = processLayers[fi].layer; break;
+                }
+            }
+            for (var bk = 0; bk < blocks.length; bk++) {
+                for (var ci2 = 0; ci2 < blocks[bk].length; ci2++) {
+                    childToProxyBlock[processLayers[blocks[bk][ci2]].layer.ind] = { parentInd: parseInt(pKey, 10), block: bk };
+                }
+                if (bk > 0) {
+                    proxyInserts.push({
+                        insertBefore: blocks[bk][0],
+                        parentInd: parseInt(pKey, 10),
+                        parentLayer: parentLayer,
+                        block: bk
+                    });
+                }
+            }
+        }
+        proxyInserts.sort(function(a, b) { return b.insertBefore - a.insertBefore; });
+        for (var ii = 0; ii < proxyInserts.length; ii++) {
+            var ins = proxyInserts[ii];
+            var proxyEntry = {
+                index: -1,
+                layer: { ind: -(ins.parentInd * 100 + ins.block), nm: (ins.parentLayer ? ins.parentLayer.nm : "Null") + " [proxy]", parent: null },
+                kind: "proxy",
+                proxyForInd: ins.parentInd,
+                proxyBlock: ins.block
+            };
+            processLayers.splice(ins.insertBefore, 0, proxyEntry);
+            for (var ck in childToProxyBlock) {
+                if (!childToProxyBlock.hasOwnProperty(ck)) continue;
+                if (childToProxyBlock[ck].parentInd === ins.parentInd && childToProxyBlock[ck].block === ins.block) {
+                    childToProxyBlock[ck].proxyInd = proxyEntry.layer.ind;
+                }
+            }
+        }
+    })();
 
     var idByInd = {};
     var targetIdsByInd = {};
@@ -1745,6 +1905,13 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                 nodeId = createGroup(name);
             } catch (e) {
                 console.log("Lottie Importer: Could not create null layer '" + name + "': " + e.message);
+                continue;
+            }
+        } else if (entry.kind === "proxy") {
+            try {
+                nodeId = createGroup(name);
+            } catch (e) {
+                console.log("Lottie Importer: Could not create proxy group '" + name + "': " + e.message);
                 continue;
             }
         } else if (entry.kind === "shape") {
@@ -1855,37 +2022,100 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         layerByInd[layers[li].ind] = layers[li];
     }
 
-    // Pass 2: Parenting (backward — api.parent prepends, so last-to-first
-    // preserves Lottie's top-to-bottom stacking among siblings)
-    for (var j = layers.length - 1; j >= 0; j--) {
-        var l = layers[j];
-        if (l.parent == null) continue;
-        var childId = idByInd[l.ind];
-        var parentId = idByInd[l.parent];
-        if (childId && parentId && childId !== parentId) {
-            try { api.parent(childId, parentId); }
-            catch (e) { console.log("Lottie Importer: Could not parent '" + (l.nm || l.ind) + "': " + e.message); }
-
-            // In AE, a parent's transform applies even when the parent is
-            // outside its in/out range. Cavalry hides children of inactive
-            // parents, so expand the parent's frame range to cover children.
-            var pLayer = layerByInd[l.parent];
-            if (pLayer && l.ip != null && pLayer.ip != null && l.ip < pLayer.ip) {
-                try { api.setInFrame(parentId, l.ip + tOff); pLayer.ip = l.ip; } catch (e) {}
-            }
-            if (pLayer && l.op != null && pLayer.op != null && l.op > pLayer.op) {
-                try { api.setOutFrame(parentId, l.op + tOff); pLayer.op = l.op; } catch (e) {}
-            }
+    // Matte-source parents: td=1 layers that also have children need a
+    // proxy so children stay visible when the matte source is hidden.
+    var matteProxyByInd = {};
+    for (var mi = 0; mi < layers.length; mi++) {
+        if (layers[mi].td !== 1) continue;
+        var matteInd2 = layers[mi].ind;
+        var hasChildren = layers.some(function(c) { return c.parent === matteInd2; });
+        if (!hasChildren) continue;
+        var matteNodeId = idByInd[matteInd2];
+        if (!matteNodeId) continue;
+        try {
+            var matteProxyId = createGroup((layers[mi].nm || "Matte") + " [parent]");
+            if (layers[mi].ip != null) { try { api.setInFrame(matteProxyId, layers[mi].ip + tOff); } catch (e) {} }
+            if (layers[mi].op != null) { try { api.setOutFrame(matteProxyId, layers[mi].op + tOff); } catch (e) {} }
+            matteProxyByInd[matteInd2] = matteProxyId;
+        } catch (e) {
+            console.log("Lottie Importer: Could not create matte proxy for '" + layers[mi].nm + "': " + e.message);
         }
     }
-    if (groupId) {
-        for (var k = layers.length - 1; k >= 0; k--) {
-            if (layers[k].parent != null) continue;
-            var topId = idByInd[layers[k].ind];
-            if (topId) {
-                try { api.parent(topId, groupId); }
-                catch (e) {}
+
+    // Pass 2: Unified parenting via single backward iteration over
+    // processLayers.  api.parent prepends, so last-to-first preserves
+    // Lottie's top-to-bottom stacking.  By iterating processLayers (which
+    // interleaves proxy entries at the correct z-positions) instead of the
+    // raw layers array, proxies end up at the right depth relative to the
+    // real parent — not always above it.
+    for (var j = processLayers.length - 1; j >= 0; j--) {
+        var uEntry = processLayers[j];
+        var uLayer = uEntry.layer;
+        var uNodeId = idByInd[uLayer.ind];
+        if (!uNodeId) continue;
+
+        if (uEntry.kind === "proxy") {
+            var realPL = layerByInd[uEntry.proxyForInd];
+            var gpTarget = null;
+            if (realPL && realPL.parent != null) gpTarget = idByInd[realPL.parent];
+            if (!gpTarget && groupId) gpTarget = groupId;
+            if (gpTarget) {
+                try { api.parent(uNodeId, gpTarget); } catch (e) {}
             }
+        } else if (uLayer.parent != null) {
+            var uParentId = idByInd[uLayer.parent];
+            if (!uParentId || uNodeId === uParentId) continue;
+
+            var uTarget = uParentId;
+            if (matteProxyByInd[uLayer.parent]) {
+                uTarget = matteProxyByInd[uLayer.parent];
+            } else {
+                var uBlock = childToProxyBlock[uLayer.ind];
+                if (uBlock && uBlock.block > 0 && uBlock.proxyInd != null) {
+                    var uProxyId = idByInd[uBlock.proxyInd];
+                    if (uProxyId) uTarget = uProxyId;
+                }
+            }
+
+            try { api.parent(uNodeId, uTarget); }
+            catch (e) { console.log("Lottie Importer: Could not parent '" + (uLayer.nm || uLayer.ind) + "': " + e.message); }
+
+            // In AE a parent's transform applies even outside its in/out
+            // range; Cavalry hides children of inactive parents, so expand.
+            var frP = layerByInd[uLayer.parent];
+            if (frP && uLayer.ip != null && frP.ip != null && uLayer.ip < frP.ip) {
+                try { api.setInFrame(uParentId, uLayer.ip + tOff); frP.ip = uLayer.ip; } catch (e) {}
+            }
+            if (frP && uLayer.op != null && frP.op != null && uLayer.op > frP.op) {
+                try { api.setOutFrame(uParentId, uLayer.op + tOff); frP.op = uLayer.op; } catch (e) {}
+            }
+        } else if (groupId) {
+            try { api.parent(uNodeId, groupId); } catch (e) {}
+        }
+    }
+    // Set each proxy's frame range to its real parent's (already-expanded) range
+    for (var pfr = 0; pfr < processLayers.length; pfr++) {
+        if (processLayers[pfr].kind !== "proxy") continue;
+        var proxyFrId = idByInd[processLayers[pfr].layer.ind];
+        var realPFrL = layerByInd[processLayers[pfr].proxyForInd];
+        if (proxyFrId && realPFrL) {
+            if (realPFrL.ip != null) { try { api.setInFrame(proxyFrId, realPFrL.ip + tOff); } catch (e) {} }
+            if (realPFrL.op != null) { try { api.setOutFrame(proxyFrId, realPFrL.op + tOff); } catch (e) {} }
+        }
+    }
+    // Matte proxy groups: parent to grandparent (the matte source's parent)
+    for (var mk in matteProxyByInd) {
+        if (!matteProxyByInd.hasOwnProperty(mk)) continue;
+        var matteLayer = layerByInd[parseInt(mk, 10)];
+        if (matteLayer && matteLayer.parent != null) {
+            var matteGpId = idByInd[matteLayer.parent];
+            if (matteGpId) {
+                try { api.parent(matteProxyByInd[mk], matteGpId); } catch (e) {}
+                continue;
+            }
+        }
+        if (groupId) {
+            try { api.parent(matteProxyByInd[mk], groupId); } catch (e) {}
         }
     }
 
@@ -1947,6 +2177,37 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
     // Pass 3: Transforms
     for (var ti = 0; ti < createdLayers.length; ti++) {
         var entry = createdLayers[ti];
+        if (entry.kind === "proxy") {
+            var realPLayer = layerByInd[entry.proxyForInd];
+            if (!realPLayer || !realPLayer.ks) continue;
+            var pxId = idByInd[entry.layer.ind];
+            if (!pxId) continue;
+            var rpHasParent = groupId ? true : (realPLayer.parent != null);
+            var rpTransform = getLayerTransform(realPLayer.ks, yFlip, rpHasParent, compW, compH, scaleFactor);
+            var rpParentPCD = (realPLayer.parent != null) ? precompDimsByInd[realPLayer.parent] : null;
+            if (rpParentPCD) {
+                rpTransform.position[0] -= scaleFactor * (rpParentPCD.w / 2);
+                rpTransform.position[1] += scaleFactor * (rpParentPCD.h / 2);
+            }
+            var rpProps = {
+                "position": rpTransform.position,
+                "rotation.z": rpTransform.rotation,
+                "scale.x": rpTransform.scale[0] / 100,
+                "scale.y": rpTransform.scale[1] / 100
+            };
+            if (rpTransform.opacity != null && rpTransform.opacity < 100) {
+                rpProps["opacity"] = rpTransform.opacity;
+            }
+            if (rpTransform.skew && Math.abs(rpTransform.skew) > 0.001) {
+                var rpSkRad = (rpTransform.skewAxis || 0) * Math.PI / 180;
+                rpProps["skew.x"] = rpTransform.skew * Math.cos(rpSkRad);
+                rpProps["skew.y"] = rpTransform.skew * Math.sin(rpSkRad);
+            }
+            api.set(pxId, rpProps);
+            keyframeAnimatedTransforms(pxId, realPLayer.ks, yFlip, rpHasParent,
+                compW, compH, scaleFactor, tOff, null, rpParentPCD);
+            continue;
+        }
         var tLayer = entry.layer;
         var tId = idByInd[tLayer.ind];
         if (!tId) continue;
@@ -1996,6 +2257,42 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         }
         api.set(tId, setProps);
         keyframeAnimatedTransforms(tId, tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor, tOff, precompDims, parentPCD);
+    }
+
+    // Apply transforms to matte proxy groups (duplicating the matte source's local transforms)
+    for (var mpk in matteProxyByInd) {
+        if (!matteProxyByInd.hasOwnProperty(mpk)) continue;
+        var mpLayer = layerByInd[parseInt(mpk, 10)];
+        if (!mpLayer || !mpLayer.ks) continue;
+        var mpId = matteProxyByInd[mpk];
+        var mpHasParent = groupId ? true : (mpLayer.parent != null);
+        var mpTransform = getLayerTransform(mpLayer.ks, yFlip, mpHasParent, compW, compH, scaleFactor);
+        var mpParentPCD = (mpLayer.parent != null) ? precompDimsByInd[mpLayer.parent] : null;
+        if (mpParentPCD) {
+            mpTransform.position[0] -= scaleFactor * (mpParentPCD.w / 2);
+            mpTransform.position[1] += scaleFactor * (mpParentPCD.h / 2);
+        }
+        var mpProps = {
+            "position": mpTransform.position,
+            "rotation.z": mpTransform.rotation,
+            "scale.x": mpTransform.scale[0] / 100,
+            "scale.y": mpTransform.scale[1] / 100
+        };
+        if (mpTransform.opacity != null && mpTransform.opacity < 100) {
+            mpProps["opacity"] = mpTransform.opacity;
+        }
+        if (mpTransform.skew && Math.abs(mpTransform.skew) > 0.001) {
+            var mpSkRad = (mpTransform.skewAxis || 0) * Math.PI / 180;
+            mpProps["skew.x"] = mpTransform.skew * Math.cos(mpSkRad);
+            mpProps["skew.y"] = mpTransform.skew * Math.sin(mpSkRad);
+        }
+        try {
+            api.set(mpId, mpProps);
+            keyframeAnimatedTransforms(mpId, mpLayer.ks, yFlip, mpHasParent,
+                compW, compH, scaleFactor, tOff, null, mpParentPCD);
+        } catch (e) {
+            console.log("Lottie Importer: Could not set matte proxy transforms: " + e.message);
+        }
     }
 
     return createdIds;
