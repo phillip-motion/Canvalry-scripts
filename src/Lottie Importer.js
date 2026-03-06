@@ -1,8 +1,12 @@
 // Lottie Importer for Cavalry
-// Imports Lottie JSON shape layers (ty:4) as editable shapes with fills.
-// Supports static and animated paths, layer transforms, parenting, timing,
-// multiple shapes per layer, pathless parent groups, animated transforms,
-// masks (including animated mask paths), and recursive nested precomps.
+// Imports Lottie JSON animations as native Cavalry layers.
+// Supports: Shape (ty=4), Solid (ty=1), Image (ty=2), Text (ty=5), Null (ty=3),
+// Precomp (ty=0) layers. Shapes include Path, Rectangle, Ellipse, PolyStar, Groups.
+// Styles: Fill, Gradient Fill/Stroke, Stroke (color/width/cap/join/dash/opacity),
+// Trim Path (start/end/travel), Rounded Corners, Offset Path, Blend Modes.
+// Transforms: Position, Anchor, Scale, Rotation, Opacity, Skew — with animated
+// keyframes, bezier easing, hold keyframes, and group transform propagation.
+// Also: Parenting, track mattes, masks, compound paths, repeaters, precomps.
 
 ui.setTitle("Lottie Importer");
 
@@ -322,6 +326,47 @@ function applyGradientFill(shapeId, gradInfo, scaleFactor) {
     }
 }
 
+// --- Lottie blend mode to Cavalry enum mapping ---
+var LOTTIE_BLEND_MODE_MAP = [
+    0,  // 0: Normal -> 0
+    24, // 1: Multiply -> 24
+    14, // 2: Screen -> 14
+    15, // 3: Overlay -> 15
+    16, // 4: Darken -> 16
+    17, // 5: Lighten -> 17
+    18, // 6: Color Dodge -> 18
+    19, // 7: Color Burn -> 19
+    20, // 8: Hard Light -> 20
+    21, // 9: Soft Light -> 21
+    22, // 10: Difference -> 22
+    23, // 11: Exclusion -> 23
+    25, // 12: Hue -> 25
+    26, // 13: Saturation -> 26
+    27, // 14: Color -> 27
+    28  // 15: Luminosity -> 28
+];
+
+function lottieBlendModeToCavalry(bm) {
+    if (bm == null || bm === 0) return 0;
+    if (bm >= 0 && bm < LOTTIE_BLEND_MODE_MAP.length) return LOTTIE_BLEND_MODE_MAP[bm];
+    return 0;
+}
+
+function applyBlendModeToNode(nodeId, bm) {
+    var cavEnum = lottieBlendModeToCavalry(bm);
+    if (cavEnum !== 0) {
+        try { api.set(nodeId, { "blendMode": cavEnum }); } catch (e) {}
+    }
+}
+
+// --- Extract fill opacity from Lottie fill item ---
+function extractFillOpacity(flItem) {
+    if (!flItem || flItem.ty !== "fl" || !flItem.o) return 100;
+    var oVal = getStaticValue(flItem.o, 100);
+    if (Array.isArray(oVal)) oVal = oVal[0];
+    return oVal;
+}
+
 // --- Extract stroke info from Lottie stroke item ---
 function extractStrokeInfo(stItem) {
     if (!stItem || stItem.ty !== "st") return null;
@@ -344,7 +389,57 @@ function extractStrokeInfo(stItem) {
         var wVal = getStaticValue(stItem.w, 2);
         w = Array.isArray(wVal) ? wVal[0] : wVal;
     }
-    return { color: color, width: w };
+    var oVal = 100;
+    if (stItem.o) {
+        oVal = getStaticValue(stItem.o, 100);
+        if (Array.isArray(oVal)) oVal = oVal[0];
+    }
+    var lineCap = stItem.lc || 0;
+    var lineJoin = stItem.lj || 0;
+    var miterLimit = stItem.ml || stItem.ml2 || 4;
+    if (typeof miterLimit === "object") miterLimit = getStaticValue(miterLimit, 4);
+    var dashes = null;
+    if (stItem.d && Array.isArray(stItem.d)) {
+        dashes = [];
+        for (var di = 0; di < stItem.d.length; di++) {
+            var de = stItem.d[di];
+            var dv = de.v ? getStaticValue(de.v, 0) : 0;
+            if (Array.isArray(dv)) dv = dv[0];
+            dashes.push({ n: de.n || "d", v: dv });
+        }
+    }
+    var cKs = (stItem.c && stItem.c.a === 1) ? stItem.c : null;
+    var wKs = (stItem.w && stItem.w.a === 1) ? stItem.w : null;
+    return {
+        color: color, width: w, opacity: oVal,
+        lineCap: lineCap, lineJoin: lineJoin, miterLimit: miterLimit,
+        dashes: dashes, colorKs: cKs, widthKs: wKs
+    };
+}
+
+// --- Extract gradient stroke info from Lottie gs item ---
+function extractGradientStrokeInfo(gsItem) {
+    if (!gsItem || gsItem.ty !== "gs") return null;
+    var gradInfo = extractGradientInfo({ ty: "gf", t: gsItem.t, s: gsItem.s, e: gsItem.e, g: gsItem.g });
+    var w = 2;
+    if (gsItem.w) {
+        var wVal = getStaticValue(gsItem.w, 2);
+        w = Array.isArray(wVal) ? wVal[0] : wVal;
+    }
+    var oVal = 100;
+    if (gsItem.o) {
+        oVal = getStaticValue(gsItem.o, 100);
+        if (Array.isArray(oVal)) oVal = oVal[0];
+    }
+    var lineCap = gsItem.lc || 0;
+    var lineJoin = gsItem.lj || 0;
+    var miterLimit = gsItem.ml || 4;
+    return {
+        color: "#000000", width: w, opacity: oVal,
+        lineCap: lineCap, lineJoin: lineJoin, miterLimit: miterLimit,
+        dashes: null, colorKs: null, widthKs: null,
+        gradientInfo: gradInfo
+    };
 }
 
 // --- Convert Lottie ellipse (ty:el) to path data ---
@@ -402,37 +497,99 @@ function rectToPathData(rcItem) {
     };
 }
 
-// --- Extract transform position and anchor from a Lottie tr item ---
+// --- Extract full transform from a Lottie tr item ---
 function extractGroupTransform(trItem) {
-    if (!trItem) return { px: 0, py: 0, ax: 0, ay: 0 };
+    if (!trItem) return { px: 0, py: 0, ax: 0, ay: 0, r: 0, sx: 100, sy: 100, opacity: 100, sk: 0, sa: 0 };
     var tp = trItem.p && trItem.p.k ? trItem.p.k : (trItem.p || [0, 0]);
     var ta = trItem.a && trItem.a.k ? trItem.a.k : (trItem.a || [0, 0]);
+    var rVal = 0;
+    if (trItem.r) {
+        rVal = getStaticValue(trItem.r, 0);
+        if (Array.isArray(rVal)) rVal = rVal[0];
+    }
+    var sVal = getStaticValue(trItem.s, [100, 100]);
+    var sx = Array.isArray(sVal) ? sVal[0] : sVal;
+    var sy = Array.isArray(sVal) ? sVal[1] : sVal;
+    var oVal = 100;
+    if (trItem.o) {
+        oVal = getStaticValue(trItem.o, 100);
+        if (Array.isArray(oVal)) oVal = oVal[0];
+    }
     return {
         px: Array.isArray(tp) ? tp[0] : (tp.x || 0),
         py: Array.isArray(tp) ? tp[1] : (tp.y || 0),
         ax: Array.isArray(ta) ? ta[0] : (ta.x || 0),
-        ay: Array.isArray(ta) ? ta[1] : (ta.y || 0)
+        ay: Array.isArray(ta) ? ta[1] : (ta.y || 0),
+        r: rVal, sx: sx, sy: sy, opacity: oVal,
+        sk: trItem.sk ? (function() { var v = getStaticValue(trItem.sk, 0); return Array.isArray(v) ? v[0] : v; })() : 0,
+        sa: trItem.sa ? (function() { var v = getStaticValue(trItem.sa, 0); return Array.isArray(v) ? v[0] : v; })() : 0
     };
 }
 
+// --- Transform a point by group scale and rotation around origin ---
+function transformPoint(x, y, sx, sy, rotDeg) {
+    var scaledX = x * (sx / 100);
+    var scaledY = y * (sy / 100);
+    if (Math.abs(rotDeg) < 0.001) return [scaledX, scaledY];
+    var rad = rotDeg * Math.PI / 180;
+    var cosR = Math.cos(rad);
+    var sinR = Math.sin(rad);
+    return [scaledX * cosR - scaledY * sinR, scaledX * sinR + scaledY * cosR];
+}
+
+// --- Transform Lottie path data vertices by group scale and rotation ---
+function transformPathData(pathData, sx, sy, rotDeg) {
+    if (!pathData || !pathData.v || (Math.abs(sx - 100) < 0.01 && Math.abs(sy - 100) < 0.01 && Math.abs(rotDeg) < 0.001)) return pathData;
+    var v = [], inT = [], outT = [];
+    for (var i = 0; i < pathData.v.length; i++) {
+        var tv = transformPoint(pathData.v[i][0], pathData.v[i][1], sx, sy, rotDeg);
+        v.push(tv);
+        var ti = pathData.i[i] || [0, 0];
+        var to = pathData.o[i] || [0, 0];
+        var tis = transformPoint(ti[0], ti[1], sx, sy, rotDeg);
+        var tos = transformPoint(to[0], to[1], sx, sy, rotDeg);
+        inT.push(tis);
+        outT.push(tos);
+    }
+    return { v: v, i: inT, o: outT, c: pathData.c };
+}
+
 // --- Recursively collect shapes from nested Lottie groups ---
-// Accumulates transforms (tr.p - tr.a) across nesting levels and inherits
-// fill/gradient/stroke from ancestor groups so deeply-nested shapes are found.
-// Detects compound paths: when sibling sub-groups each have a path but no
-// individual fill, and a shared fill exists at this level, they are merged
-// into a single result with isCompound=true for Even-Odd rendering.
-function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradient, inheritedStroke, inheritedHasFill, results) {
+function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradient, inheritedStroke, inheritedHasFill, results, accSX, accSY, accR, accO, accFillOp) {
+    var asx = accSX != null ? accSX : 100;
+    var asy = accSY != null ? accSY : 100;
+    var ar = accR || 0;
+    var ao = accO != null ? accO : 100;
+    var afo = accFillOp != null ? accFillOp : 100;
     var localFill = inheritedFill;
     var localGradient = inheritedGradient;
     var localStroke = inheritedStroke;
     var foundFill = inheritedHasFill;
     var localShapes = [];
     var trItem = null;
+    var localFillOpacity = afo;
+    var localFillColorKs = null;
+    var localFillOpacityKs = null;
+    var localRdValue = null;
+    var localOpAmount = null;
+    var localPolyStars = [];
 
     for (var i = 0; i < items.length; i++) {
         var item = items[i];
-        if (item.ty === "fl") { localFill = extractFillColor(item); foundFill = true; localGradient = null; }
+        if (item.hd === true) continue;
+        if (item.ty === "fl") {
+            localFill = extractFillColor(item);
+            localFillOpacity = extractFillOpacity(item);
+            localFillColorKs = (item.c && item.c.a === 1) ? item.c : null;
+            localFillOpacityKs = (item.o && item.o.a === 1) ? item.o : null;
+            foundFill = true;
+            localGradient = null;
+        }
         if (item.ty === "gf") { localGradient = extractGradientInfo(item); foundFill = true; }
+        if (item.ty === "gs") {
+            var gsInfo = extractGradientStrokeInfo(item);
+            if (gsInfo) localStroke = gsInfo;
+        }
         if (item.ty === "st") localStroke = extractStrokeInfo(item);
         if (item.ty === "tr") trItem = item;
         if (item.ty === "sh") {
@@ -444,16 +601,61 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
         if (item.ty === "el") {
             localShapes.push({ pathData: ellipseToPathData(item), pathKs: null });
         }
+        if (item.ty === "sr") {
+            localPolyStars.push(item);
+        }
+        if (item.ty === "rp") {
+            var rpCopies = getStaticValue(item.c, 3);
+            if (Array.isArray(rpCopies)) rpCopies = rpCopies[0];
+            var rpOff = getStaticValue(item.o, 0);
+            if (Array.isArray(rpOff)) rpOff = rpOff[0];
+            var rpTr = item.tr || {};
+            var rpPx = rpTr.p ? getStaticValue(rpTr.p, [0, 0]) : [0, 0];
+            var rpSc = rpTr.s ? getStaticValue(rpTr.s, [100, 100]) : [100, 100];
+            var rpRot = rpTr.r ? getStaticValue(rpTr.r, 0) : 0;
+            if (Array.isArray(rpRot)) rpRot = rpRot[0];
+            var rpOp = rpTr.o ? getStaticValue(rpTr.o, 100) : 100;
+            if (Array.isArray(rpOp)) rpOp = rpOp[0];
+            var rpAx = rpTr.a ? getStaticValue(rpTr.a, [0, 0]) : [0, 0];
+            item._rpData = {
+                copies: Math.round(rpCopies), offset: rpOff,
+                px: Array.isArray(rpPx) ? rpPx[0] : 0, py: Array.isArray(rpPx) ? rpPx[1] : 0,
+                sx: Array.isArray(rpSc) ? rpSc[0] : 100, sy: Array.isArray(rpSc) ? rpSc[1] : 100,
+                r: rpRot, opacity: rpOp,
+                ax: Array.isArray(rpAx) ? rpAx[0] : 0, ay: Array.isArray(rpAx) ? rpAx[1] : 0
+            };
+        }
+        if (item.ty === "rd") {
+            var rdV = getStaticValue(item.r, 0);
+            if (Array.isArray(rdV)) rdV = rdV[0];
+            localRdValue = rdV;
+        }
+        if (item.ty === "op") {
+            var opA = item.a ? getStaticValue(item.a, 0) : 0;
+            if (Array.isArray(opA)) opA = opA[0];
+            localOpAmount = opA;
+        }
     }
 
     var tr = extractGroupTransform(trItem);
-    var curX = accX + tr.px - tr.ax;
-    var curY = accY + tr.py - tr.ay;
+    var localDx = tr.px - tr.ax;
+    var localDy = tr.py - tr.ay;
+    var tPt = transformPoint(localDx, localDy, asx, asy, ar);
+    var curX = accX + tPt[0];
+    var curY = accY + tPt[1];
+    var newSX = asx * (tr.sx / 100);
+    var newSY = asy * (tr.sy / 100);
+    var newR = ar + tr.r;
+    var newO = ao * (tr.opacity / 100);
 
     for (var si = 0; si < localShapes.length; si++) {
         if (localShapes[si].pathData) {
+            var pd = localShapes[si].pathData;
+            if (Math.abs(newSX - 100) > 0.01 || Math.abs(newSY - 100) > 0.01 || Math.abs(newR) > 0.001) {
+                pd = transformPathData(pd, newSX, newSY, newR);
+            }
             results.push({
-                pathData: localShapes[si].pathData,
+                pathData: pd,
                 pathKs: localShapes[si].pathKs,
                 fillColor: localFill,
                 gradientInfo: localGradient,
@@ -461,13 +663,83 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 hasFill: foundFill,
                 strokeInfo: localStroke,
                 isCompound: false,
-                compoundPaths: null
+                compoundPaths: null,
+                groupOpacity: newO,
+                fillOpacity: localFillOpacity,
+                fillColorKs: localFillColorKs,
+                fillOpacityKs: localFillOpacityKs,
+                rdValue: localRdValue,
+                opAmount: localOpAmount,
+                groupScaleX: newSX,
+                groupScaleY: newSY
             });
         }
     }
 
-    // Detect compound path pattern: multiple sibling sub-groups each containing
-    // a path but no individual fill, with a shared fill at this level.
+    for (var psi = 0; psi < localPolyStars.length; psi++) {
+        results.push({
+            pathData: null,
+            pathKs: null,
+            fillColor: localFill,
+            gradientInfo: localGradient,
+            groupOffset: [curX, curY],
+            hasFill: foundFill,
+            strokeInfo: localStroke,
+            isCompound: false,
+            compoundPaths: null,
+            groupOpacity: newO,
+            fillOpacity: localFillOpacity,
+            fillColorKs: localFillColorKs,
+            fillOpacityKs: localFillOpacityKs,
+            rdValue: localRdValue,
+            opAmount: localOpAmount,
+            polyStar: localPolyStars[psi],
+            groupScaleX: newSX,
+            groupScaleY: newSY
+        });
+    }
+
+    // Repeater: duplicate shapes with baked transforms
+    var rpItem = null;
+    for (var rpi = 0; rpi < items.length; rpi++) {
+        if (items[rpi].ty === "rp" && items[rpi]._rpData) { rpItem = items[rpi]; break; }
+    }
+    if (rpItem && rpItem._rpData) {
+        var rp = rpItem._rpData;
+        var origCount = results.length;
+        var origResults = [];
+        for (var ori = origCount - localShapes.length - localPolyStars.length; ori < origCount; ori++) {
+            if (ori >= 0) origResults.push(results[ori]);
+        }
+        for (var ci = 1; ci < rp.copies; ci++) {
+            var rpDx = rp.px * ci;
+            var rpDy = rp.py * ci;
+            var rpRot = rp.r * ci;
+            var rpSx = Math.pow(rp.sx / 100, ci) * 100;
+            var rpSy = Math.pow(rp.sy / 100, ci) * 100;
+            var rpOp = Math.pow(rp.opacity / 100, ci) * 100;
+            for (var oij = 0; oij < origResults.length; oij++) {
+                var origShape = origResults[oij];
+                var cloned = {};
+                for (var pk in origShape) {
+                    if (origShape.hasOwnProperty(pk)) cloned[pk] = origShape[pk];
+                }
+                if (cloned.pathData) {
+                    cloned.pathData = transformPathData(cloned.pathData, rpSx, rpSy, rpRot);
+                }
+                cloned.groupOffset = [
+                    (cloned.groupOffset ? cloned.groupOffset[0] : 0) + rpDx,
+                    (cloned.groupOffset ? cloned.groupOffset[1] : 0) + rpDy
+                ];
+                if (cloned.groupOpacity != null) {
+                    cloned.groupOpacity = cloned.groupOpacity * (rpOp / 100);
+                }
+                cloned.pathKs = null;
+                results.push(cloned);
+            }
+        }
+    }
+
     var subGroups = [];
     for (var gi = 0; gi < items.length; gi++) {
         if (items[gi].ty === "gr" && items[gi].it) subGroups.push(items[gi]);
@@ -502,10 +774,13 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             }
             if (subHasFill || !subHasPath) { allQualify = false; break; }
             var subTr = extractGroupTransform(subTrItem);
+            var sDx = subTr.px - subTr.ax;
+            var sDy = subTr.py - subTr.ay;
+            var sPt = transformPoint(sDx, sDy, newSX, newSY, newR);
             compoundParts.push({
                 pathData: subPathData,
                 pathKs: subPathKs,
-                groupOffset: [curX + subTr.px - subTr.ax, curY + subTr.py - subTr.ay]
+                groupOffset: [curX + sPt[0], curY + sPt[1]]
             });
         }
         if (allQualify && compoundParts.length > 1) {
@@ -518,14 +793,20 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 hasFill: true,
                 strokeInfo: localStroke,
                 isCompound: true,
-                compoundPaths: compoundParts
+                compoundPaths: compoundParts,
+                groupOpacity: newO,
+                fillOpacity: localFillOpacity,
+                fillColorKs: localFillColorKs,
+                fillOpacityKs: localFillOpacityKs,
+                rdValue: localRdValue,
+                opAmount: localOpAmount
             });
             return;
         }
     }
 
     for (var gi2 = 0; gi2 < subGroups.length; gi2++) {
-        collectShapesFromItems(subGroups[gi2].it, curX, curY, localFill, localGradient, localStroke, foundFill, results);
+        collectShapesFromItems(subGroups[gi2].it, curX, curY, localFill, localGradient, localStroke, foundFill, results, newSX, newSY, newR, newO, localFillOpacity);
     }
 }
 
@@ -542,6 +823,10 @@ function getAllShapesFromLayer(layer) {
         if (shapes[p].ty === "fl") { topFill = extractFillColor(shapes[p]); topHasFill = true; topGradient = null; }
         if (shapes[p].ty === "gf") { topGradient = extractGradientInfo(shapes[p]); topHasFill = true; }
         if (shapes[p].ty === "st") topStroke = extractStrokeInfo(shapes[p]);
+        if (shapes[p].ty === "gs") {
+            var gsInfo = extractGradientStrokeInfo(shapes[p]);
+            if (gsInfo) topStroke = gsInfo;
+        }
     }
     var result = [];
     for (var s = 0; s < shapes.length; s++) {
@@ -559,13 +844,37 @@ function getAllShapesFromLayer(layer) {
         if (Array.isArray(startVal)) startVal = startVal[0];
         var endVal = getStaticValue(trimItem.e, 100);
         if (Array.isArray(endVal)) endVal = endVal[0];
+        var offVal = 0;
+        if (trimItem.o) {
+            offVal = getStaticValue(trimItem.o, 0);
+            if (Array.isArray(offVal)) offVal = offVal[0];
+        }
         var trimInfo = {
             start: startVal,
             end: endVal,
+            offset: offVal,
             startKs: (trimItem.s && trimItem.s.a === 1) ? trimItem.s : null,
-            endKs: (trimItem.e && trimItem.e.a === 1) ? trimItem.e : null
+            endKs: (trimItem.e && trimItem.e.a === 1) ? trimItem.e : null,
+            offsetKs: (trimItem.o && trimItem.o.a === 1) ? trimItem.o : null
         };
         for (var ri = 0; ri < result.length; ri++) result[ri].trimInfo = trimInfo;
+    }
+    // Scan for top-level rounded corners (ty=rd) and offset path (ty=op)
+    for (var mi = 0; mi < shapes.length; mi++) {
+        if (shapes[mi].ty === "rd") {
+            var rdVal = getStaticValue(shapes[mi].r, 0);
+            if (Array.isArray(rdVal)) rdVal = rdVal[0];
+            for (var ri2 = 0; ri2 < result.length; ri2++) {
+                if (!result[ri2].rdValue) result[ri2].rdValue = rdVal;
+            }
+        }
+        if (shapes[mi].ty === "op") {
+            var opAmt = shapes[mi].a ? getStaticValue(shapes[mi].a, 0) : 0;
+            if (Array.isArray(opAmt)) opAmt = opAmt[0];
+            for (var ri3 = 0; ri3 < result.length; ri3++) {
+                if (!result[ri3].opAmount) result[ri3].opAmount = opAmt;
+            }
+        }
     }
     return result;
 }
@@ -605,11 +914,24 @@ function getLayerTransform(ks, yFlip, hasParent, compW, compH, scale) {
     var oVal = getStaticValue(ks.o, 100);
     if (Array.isArray(oVal)) oVal = oVal[0];
 
+    var skewVal = 0;
+    if (ks.sk) {
+        skewVal = getStaticValue(ks.sk, 0);
+        if (Array.isArray(skewVal)) skewVal = skewVal[0];
+    }
+    var skewAxis = 0;
+    if (ks.sa) {
+        skewAxis = getStaticValue(ks.sa, 0);
+        if (Array.isArray(skewAxis)) skewAxis = skewAxis[0];
+    }
+
     return {
         position: [cavX, cavY],
         scale: [Array.isArray(s) ? s[0] : s, Array.isArray(s) ? s[1] : s],
         rotation: cavR,
-        opacity: oVal
+        opacity: oVal,
+        skew: skewVal,
+        skewAxis: skewAxis
     };
 }
 
@@ -636,7 +958,9 @@ function applyLottieEasing(nodeId, attr, cavalryKfs, lottieKfs, component) {
     var ci = (component != null) ? component : 0;
     for (var i = 0; i < cavalryKfs.length - 1; i++) {
         var lkf = lottieKfs[i];
-        if (!lkf || !lkf.o) continue;
+        if (!lkf) continue;
+        if (lkf.h === 1) continue;
+        if (!lkf.o) continue;
         var curFrame = cavalryKfs[i].frame;
         var curValue = cavalryKfs[i].value;
         var nxtFrame = cavalryKfs[i + 1].frame;
@@ -867,13 +1191,38 @@ function keyframeSingleValue(nodeId, attrName, ks, timeOffset) {
 function applyTrimPath(nodeId, trimInfo, tOff) {
     if (!trimInfo) return;
     api.setStroke(nodeId, true);
-    api.set(nodeId, {
+    var trimProps = {
         "stroke.trim": 1,
         "stroke.trimStart": trimInfo.start,
         "stroke.trimEnd": trimInfo.end
-    });
+    };
+    if (trimInfo.offset) {
+        trimProps["stroke.trimTravel"] = (trimInfo.offset / 360) * 100;
+    }
+    api.set(nodeId, trimProps);
     if (trimInfo.startKs) keyframeSingleValue(nodeId, "stroke.trimStart", trimInfo.startKs, tOff);
     if (trimInfo.endKs) keyframeSingleValue(nodeId, "stroke.trimEnd", trimInfo.endKs, tOff);
+    if (trimInfo.offsetKs) keyframeTrimTravel(nodeId, trimInfo.offsetKs, tOff);
+}
+
+// Keyframe trim travel converting 0-360 degrees to 0-100 percent
+function keyframeTrimTravel(nodeId, ks, timeOffset) {
+    if (!ks || ks.a !== 1 || !ks.k || ks.k.length <= 1) return;
+    var tOff = timeOffset || 0;
+    var kfs = [];
+    for (var ki = 0; ki < ks.k.length; ki++) {
+        var kv = ks.k[ki];
+        var frame = (kv.t != null ? kv.t : 0) + tOff;
+        var val = kv.s !== undefined ? kv.s : kv.k;
+        if (Array.isArray(val)) val = val[0];
+        if (val === undefined) continue;
+        var travel = (val / 360) * 100;
+        try {
+            api.keyframe(nodeId, frame, { "stroke.trimTravel": travel });
+            kfs.push({ frame: frame, value: travel });
+        } catch (e) {}
+    }
+    applyLottieEasing(nodeId, "stroke.trimTravel", kfs, ks.k, 0);
 }
 
 // --- Animate shape path keyframes ---
@@ -962,6 +1311,287 @@ function applyMasks(layer, targetIds, yFlip, scaleFactor, nodeId, timeOffset, ma
     }
 }
 
+// --- Keyframe an animated Lottie color property (RGB array keyframes) ---
+function keyframeColorProperty(nodeId, attrName, ks, timeOffset) {
+    if (!ks || ks.a !== 1 || !ks.k || ks.k.length <= 1) return;
+    var tOff = timeOffset || 0;
+    for (var ki = 0; ki < ks.k.length; ki++) {
+        var kv = ks.k[ki];
+        var frame = (kv.t != null ? kv.t : 0) + tOff;
+        var val = kv.s;
+        if (!Array.isArray(val) || val.length < 3) continue;
+        var hex = "#" + [val[0], val[1], val[2]].map(function(x) {
+            var n = Math.round(Math.max(0, Math.min(1, x)) * 255);
+            return (n < 16 ? "0" : "") + n.toString(16);
+        }).join("");
+        var obj = {};
+        obj[attrName] = hex;
+        try { api.keyframe(nodeId, frame, obj); } catch (e) {}
+    }
+}
+
+// --- Apply stroke properties (cap, join, miter, dash) to a shape node ---
+function applyStrokeProperties(nodeId, strokeInfo, scaleFactor) {
+    if (!strokeInfo) return;
+    var capMap = { 1: 0, 2: 1, 3: 2 };
+    var joinMap = { 1: 0, 2: 1, 3: 2 };
+    var props = {};
+    if (strokeInfo.lineCap && capMap[strokeInfo.lineCap] !== undefined) {
+        props["stroke.capStyle"] = capMap[strokeInfo.lineCap];
+    }
+    if (strokeInfo.lineJoin && joinMap[strokeInfo.lineJoin] !== undefined) {
+        props["stroke.joinStyle"] = joinMap[strokeInfo.lineJoin];
+    }
+    if (strokeInfo.miterLimit) {
+        props["stroke.miterLimit"] = strokeInfo.miterLimit;
+    }
+    try { api.set(nodeId, props); } catch (e) {}
+    if (strokeInfo.dashes) {
+        var dashVal = 0, gapVal = 0, offsetVal = 0;
+        for (var di = 0; di < strokeInfo.dashes.length; di++) {
+            var de = strokeInfo.dashes[di];
+            if (de.n === "d") dashVal = de.v * scaleFactor;
+            else if (de.n === "g") gapVal = de.v * scaleFactor;
+            else if (de.n === "o") offsetVal = de.v * scaleFactor;
+        }
+        if (dashVal > 0) {
+            try {
+                api.set(nodeId, {
+                    "stroke.dash": 1,
+                    "stroke.dashLength": dashVal,
+                    "stroke.gapLength": gapVal || dashVal,
+                    "stroke.dashOffset": offsetVal
+                });
+            } catch (e) {}
+        }
+    }
+}
+
+// --- Create a PolyStar shape (star or polygon primitive) ---
+function createPolyStar(psItem, name, yFlip, scaleFactor, groupOffset, compW, compH) {
+    var sy = psItem.sy || 1;
+    var ptVal = getStaticValue(psItem.pt, 5);
+    if (Array.isArray(ptVal)) ptVal = ptVal[0];
+    var orVal = getStaticValue(psItem.or, 50);
+    if (Array.isArray(orVal)) orVal = orVal[0];
+    var posVal = getStaticValue(psItem.p, [0, 0]);
+    var px = (Array.isArray(posVal) ? posVal[0] : 0) + (groupOffset ? groupOffset[0] : 0);
+    var py = (Array.isArray(posVal) ? posVal[1] : 0) + (groupOffset ? groupOffset[1] : 0);
+    var rVal = getStaticValue(psItem.r, 0);
+    if (Array.isArray(rVal)) rVal = rVal[0];
+    var nodeId;
+    if (sy === 2) {
+        nodeId = api.primitive("polygon", name);
+        api.set(nodeId, {
+            "generator.sides": Math.round(ptVal),
+            "generator.radius": orVal * scaleFactor
+        });
+    } else {
+        nodeId = api.primitive("star", name);
+        var irVal = getStaticValue(psItem.ir, 25);
+        if (Array.isArray(irVal)) irVal = irVal[0];
+        api.set(nodeId, {
+            "generator.points": Math.round(ptVal),
+            "generator.outerRadius": orVal * scaleFactor,
+            "generator.innerRadius": irVal * scaleFactor
+        });
+    }
+    var cavX = scaleFactor * px;
+    var cavY = scaleFactor * (yFlip ? -py : py);
+    api.set(nodeId, {
+        "position.x": cavX,
+        "position.y": cavY,
+        "rotation.z": yFlip ? -rVal : rVal
+    });
+    return nodeId;
+}
+
+// --- Apply fill/stroke/opacity to a shape from collected shape data ---
+function applyShapeStyle(nodeId, shapeData, scaleFactor, tOff) {
+    if (shapeData.hasFill) {
+        api.setFill(nodeId, true);
+        api.set(nodeId, { "fillRule": shapeData.isCompound ? 0 : 1 });
+        if (shapeData.gradientInfo) {
+            applyGradientFill(nodeId, shapeData.gradientInfo, scaleFactor);
+        } else {
+            api.set(nodeId, { "material.materialColor": shapeData.fillColor });
+        }
+    } else {
+        api.setFill(nodeId, false);
+    }
+    if (shapeData.strokeInfo) {
+        api.setStroke(nodeId, true);
+        api.set(nodeId, {
+            "stroke.strokeColor": shapeData.strokeInfo.color,
+            "stroke.width": shapeData.strokeInfo.width * scaleFactor
+        });
+        applyStrokeProperties(nodeId, shapeData.strokeInfo, scaleFactor);
+        if (shapeData.strokeInfo.opacity != null && shapeData.strokeInfo.opacity < 100) {
+            try { api.set(nodeId, { "stroke.strokeColor.a": Math.round(shapeData.strokeInfo.opacity * 2.55) }); } catch (e) {}
+        }
+        if (shapeData.strokeInfo.colorKs) keyframeColorProperty(nodeId, "stroke.strokeColor", shapeData.strokeInfo.colorKs, tOff);
+        if (shapeData.strokeInfo.widthKs) keyframeSingleValue(nodeId, "stroke.width", shapeData.strokeInfo.widthKs, tOff);
+        if (shapeData.strokeInfo.gradientInfo) {
+            applyGradientFill(nodeId, shapeData.strokeInfo.gradientInfo, scaleFactor);
+        }
+    }
+    applyTrimPath(nodeId, shapeData.trimInfo, tOff);
+    // Group opacity
+    var effectiveOpacity = 100;
+    if (shapeData.groupOpacity != null && shapeData.groupOpacity < 100) effectiveOpacity = shapeData.groupOpacity;
+    if (effectiveOpacity < 100) {
+        try { api.set(nodeId, { "opacity": effectiveOpacity }); } catch (e) {}
+    }
+    // Fill opacity
+    if (shapeData.hasFill && shapeData.fillOpacity != null && shapeData.fillOpacity < 100) {
+        try { api.set(nodeId, { "material.alpha": shapeData.fillOpacity }); } catch (e) {}
+    }
+    // Animated fill color
+    if (shapeData.fillColorKs) keyframeColorProperty(nodeId, "material.materialColor", shapeData.fillColorKs, tOff);
+    // Animated fill opacity
+    if (shapeData.fillOpacityKs) keyframeSingleValue(nodeId, "material.alpha", shapeData.fillOpacityKs, tOff);
+    // Rounded corners via Bevel deformer
+    if (shapeData.rdValue && shapeData.rdValue > 0) {
+        try {
+            var bevelId = api.create("bevel", "Rounded Corners");
+            api.connect(bevelId, "id", nodeId, "deformers");
+            api.set(bevelId, { "radius": shapeData.rdValue * scaleFactor });
+        } catch (e) {}
+    }
+    // Offset path deformer
+    if (shapeData.opAmount && Math.abs(shapeData.opAmount) > 0.001) {
+        try {
+            var offsetId = api.create("offsetPath", "Offset Path");
+            api.connect(offsetId, "id", nodeId, "deformers");
+            api.set(offsetId, { "amount": shapeData.opAmount * scaleFactor });
+        } catch (e) {}
+    }
+}
+
+// --- Create a Solid Layer (ty=1) ---
+function createSolidLayer(layer, name, yFlip, scaleFactor, compW, compH, hasParent) {
+    var sw = layer.sw || compW;
+    var sh = layer.sh || compH;
+    var sc = layer.sc || "#000000";
+    var nodeId = api.primitive("rectangle", name);
+    api.set(nodeId, {
+        "generator.dimensions": [sw * scaleFactor, sh * scaleFactor]
+    });
+    api.setFill(nodeId, true);
+    api.set(nodeId, { "material.materialColor": sc });
+    return nodeId;
+}
+
+// --- Create an Image Layer (ty=2) ---
+var lottieAssetGroupId = null;
+function createImageLayer(layer, assets, name, yFlip, scaleFactor, compW, compH) {
+    var refId = layer.refId || layer.ref;
+    if (!refId) return null;
+    var asset = null;
+    for (var ai = 0; ai < (assets || []).length; ai++) {
+        if (assets[ai].id === refId) { asset = assets[ai]; break; }
+    }
+    if (!asset) return null;
+    var imgW = asset.w || layer.sw || 100;
+    var imgH = asset.h || layer.sh || 100;
+    var nodeId = api.primitive("rectangle", name);
+    api.set(nodeId, { "generator.dimensions": [imgW * scaleFactor, imgH * scaleFactor] });
+    var b64Data = null;
+    var ext = "png";
+    if (asset.e === 1 && asset.p) {
+        var m = /^data:([^;]+);base64,(.*)$/i.exec(asset.p);
+        if (m) {
+            var mime = m[1].toLowerCase();
+            b64Data = m[2];
+            if (mime.indexOf("jpeg") !== -1 || mime.indexOf("jpg") !== -1) ext = "jpg";
+            else if (mime.indexOf("png") !== -1) ext = "png";
+            else if (mime.indexOf("webp") !== -1) ext = "webp";
+        }
+    }
+    if (b64Data) {
+        try {
+            var assetsPath = api.getAssetPath ? api.getAssetPath() : null;
+            if (assetsPath) {
+                var lottieFolderPath = assetsPath + "/Lottie";
+                try { if (api.ensureDirectory) api.ensureDirectory(lottieFolderPath); } catch (e) {}
+                var filePath = lottieFolderPath + "/" + (asset.id || "img") + "." + ext;
+                if (api.writeEncodedToBinaryFile) {
+                    api.writeEncodedToBinaryFile(filePath, b64Data);
+                    var fileAssetId = null;
+                    try { fileAssetId = api.loadAsset(filePath, false); } catch (e) {}
+                    if (!fileAssetId) { try { fileAssetId = api.importAsset(filePath); } catch (e) {} }
+                    if (fileAssetId) {
+                        var shaderId = api.create("imageShader", name + " Shader");
+                        try { api.connect(fileAssetId, "id", shaderId, "asset"); } catch (e) {}
+                        api.addArrayIndex(nodeId, "material.colorShaders");
+                        api.connect(shaderId, "id", nodeId, "material.colorShaders.0.shader");
+                        if (!lottieAssetGroupId) {
+                            try { lottieAssetGroupId = api.createAssetGroup("Lottie Assets"); } catch (e) {}
+                        }
+                        if (lottieAssetGroupId && fileAssetId) {
+                            try { api.parent(fileAssetId, lottieAssetGroupId); } catch (e) {}
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.log("Lottie Importer: Image decode failed: " + e.message);
+        }
+    }
+    return nodeId;
+}
+
+// --- Create a Text Layer (ty=5) ---
+function createTextLayer(layer, name, yFlip, scaleFactor, compW, compH) {
+    var textData = layer.t;
+    if (!textData || !textData.d || !textData.d.k || textData.d.k.length === 0) return null;
+    var doc = textData.d.k[0].s || textData.d.k[0];
+    if (!doc) return null;
+    var textString = doc.t || "";
+    if (!textString) return null;
+    var fontSize = (doc.s || 16) * scaleFactor;
+    var fontFamily = doc.f || "Arial";
+    var justification = doc.j || 0;
+    var hAlignMap = { 0: 0, 1: 1, 2: 2, 3: 3 };
+    var hAlign = hAlignMap[justification] || 0;
+    var nodeId = api.create("textShape", name);
+    var textProps = {
+        "text": textString,
+        "fontSize": fontSize,
+        "font.font": fontFamily,
+        "horizontalAlignment": hAlign,
+        "verticalAlignment": 0
+    };
+    api.set(nodeId, textProps);
+    if (doc.fc && Array.isArray(doc.fc) && doc.fc.length >= 3) {
+        var hex = "#" + [doc.fc[0], doc.fc[1], doc.fc[2]].map(function(x) {
+            var n = Math.round(Math.max(0, Math.min(1, x)) * 255);
+            return (n < 16 ? "0" : "") + n.toString(16);
+        }).join("");
+        api.set(nodeId, { "material.materialColor": hex });
+    }
+    if (doc.lh) {
+        try { api.set(nodeId, { "lineSpacing": (doc.lh - fontSize * 1.29) }); } catch (e) {}
+    }
+    if (doc.ls) {
+        try { api.set(nodeId, { "letterSpacing": doc.ls * scaleFactor }); } catch (e) {}
+    }
+    if (doc.sc && Array.isArray(doc.sc) && doc.sc.length >= 3 && doc.sw) {
+        var sHex = "#" + [doc.sc[0], doc.sc[1], doc.sc[2]].map(function(x) {
+            var n = Math.round(Math.max(0, Math.min(1, x)) * 255);
+            return (n < 16 ? "0" : "") + n.toString(16);
+        }).join("");
+        try {
+            api.setStroke(nodeId, true);
+            api.set(nodeId, {
+                "stroke.strokeColor": sHex,
+                "stroke.width": (doc.sw || 1) * scaleFactor
+            });
+        } catch (e) {}
+    }
+    return nodeId;
+}
+
 // Import a set of layers (from a precomp or root), returning created Cavalry IDs.
 // groupId: if provided, top-level layers are parented to this group and all
 // layers are treated as having a parent (no root-comp centering on positions).
@@ -976,8 +1606,13 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
     var processLayers = [];
     for (var i = 0; i < layers.length; i++) {
         var l = layers[i];
+        if (l.hd === true) continue;
         if (l.ty === 0) {
             processLayers.push({ index: i, layer: l, kind: "precomp", precompW: l.w || 0, precompH: l.h || 0 });
+        } else if (l.ty === 1) {
+            processLayers.push({ index: i, layer: l, kind: "solid" });
+        } else if (l.ty === 2) {
+            processLayers.push({ index: i, layer: l, kind: "image" });
         } else if (l.ty === 4) {
             var shapes = getAllShapesFromLayer(l);
             if (shapes.length > 0) {
@@ -985,6 +1620,8 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             } else if (parentIndSet[l.ind]) {
                 processLayers.push({ index: i, layer: l, kind: "null" });
             }
+        } else if (l.ty === 5) {
+            processLayers.push({ index: i, layer: l, kind: "text" });
         } else if (l.ty === 3 && parentIndSet[l.ind]) {
             processLayers.push({ index: i, layer: l, kind: "null" });
         }
@@ -1024,7 +1661,36 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         var name = layer.nm || "Layer " + (entry.index + 1);
         var nodeId;
 
-        if (entry.kind === "precomp") {
+        if (entry.kind === "solid") {
+            try {
+                nodeId = createSolidLayer(layer, name, yFlip, scaleFactor, compW, compH, layer.parent != null);
+            } catch (e) {
+                console.log("Lottie Importer: Could not create solid layer '" + name + "': " + e.message);
+                continue;
+            }
+            applyBlendModeToNode(nodeId, layer.bm);
+            targetIdsByInd[layer.ind] = [nodeId];
+        } else if (entry.kind === "image") {
+            try {
+                nodeId = createImageLayer(layer, assets, name, yFlip, scaleFactor, compW, compH);
+                if (!nodeId) continue;
+            } catch (e) {
+                console.log("Lottie Importer: Could not create image layer '" + name + "': " + e.message);
+                continue;
+            }
+            applyBlendModeToNode(nodeId, layer.bm);
+            targetIdsByInd[layer.ind] = [nodeId];
+        } else if (entry.kind === "text") {
+            try {
+                nodeId = createTextLayer(layer, name, yFlip, scaleFactor, compW, compH);
+                if (!nodeId) continue;
+            } catch (e) {
+                console.log("Lottie Importer: Could not create text layer '" + name + "': " + e.message);
+                continue;
+            }
+            applyBlendModeToNode(nodeId, layer.bm);
+            targetIdsByInd[layer.ind] = [nodeId];
+        } else if (entry.kind === "precomp") {
             var assetId = layer.refId || layer.ref;
             var asset = null;
             for (var ai = 0; ai < (assets || []).length; ai++) {
@@ -1071,6 +1737,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             if (childSt !== 0) {
                 try { api.offsetLayerTime(nodeId, childSt); } catch (e) {}
             }
+            applyBlendModeToNode(nodeId, layer.bm);
             applyMasks(layer, [nodeId], yFlip, scaleFactor, nodeId, tOff, maskIndexByTarget, { w: assetW, h: assetH });
             targetIdsByInd[layer.ind] = [nodeId];
         } else if (entry.kind === "null") {
@@ -1083,7 +1750,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         } else if (entry.kind === "shape") {
             var shapeList = entry.shapes;
             var targetIds = [];
-            if (shapeList.length === 1 && shapeList[0].isCompound && shapeList[0].compoundPaths) {
+            if (shapeList.length === 1 && !shapeList[0].polyStar && shapeList[0].isCompound && shapeList[0].compoundPaths) {
                 var s0c = shapeList[0];
                 var combinedPath = new cavalry.Path();
                 for (var cp = 0; cp < s0c.compoundPaths.length; cp++) {
@@ -1096,52 +1763,37 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                     console.log("Lottie Importer: Could not create compound shape '" + name + "': " + e.message);
                     continue;
                 }
-                api.setFill(nodeId, true);
-                api.set(nodeId, { "fillRule": 0 });
-                if (s0c.gradientInfo) {
-                    applyGradientFill(nodeId, s0c.gradientInfo, scaleFactor);
-                } else {
-                    api.set(nodeId, { "material.materialColor": s0c.fillColor });
+                applyShapeStyle(nodeId, s0c, scaleFactor, tOff);
+                targetIds = [nodeId];
+            } else if (shapeList.length === 1 && shapeList[0].polyStar) {
+                var ps0 = shapeList[0];
+                try {
+                    nodeId = createPolyStar(ps0.polyStar, name, yFlip, scaleFactor, ps0.groupOffset, compW, compH);
+                } catch (e) {
+                    console.log("Lottie Importer: Could not create PolyStar '" + name + "': " + e.message);
+                    continue;
                 }
-                if (s0c.strokeInfo) {
-                    api.setStroke(nodeId, true);
-                    api.set(nodeId, {
-                        "stroke.strokeColor": s0c.strokeInfo.color,
-                        "stroke.width": s0c.strokeInfo.width * scaleFactor
-                    });
-                }
-                applyTrimPath(nodeId, s0c.trimInfo, tOff);
+                applyShapeStyle(nodeId, ps0, scaleFactor, tOff);
                 targetIds = [nodeId];
             } else if (shapeList.length === 1) {
                 var s0 = shapeList[0];
-                var path = lottiePathToCavalryPath(s0.pathData, yFlip, scaleFactor, s0.groupOffset);
-                if (!path) continue;
-                try {
-                    nodeId = api.createEditable(path, name);
-                } catch (e) {
-                    console.log("Lottie Importer: Could not create shape '" + name + "': " + e.message);
-                    continue;
-                }
-                if (s0.hasFill) {
-                    api.setFill(nodeId, true);
-                    api.set(nodeId, { "fillRule": 1 });
-                    if (s0.gradientInfo) {
-                        applyGradientFill(nodeId, s0.gradientInfo, scaleFactor);
-                    } else {
-                        api.set(nodeId, { "material.materialColor": s0.fillColor });
-                    }
+                if (!s0.pathData && !s0.polyStar) continue;
+                if (s0.polyStar) {
+                    try {
+                        nodeId = createPolyStar(s0.polyStar, name, yFlip, scaleFactor, s0.groupOffset, compW, compH);
+                    } catch (e) { continue; }
                 } else {
-                    api.setFill(nodeId, false);
+                    var path = lottiePathToCavalryPath(s0.pathData, yFlip, scaleFactor, s0.groupOffset);
+                    if (!path) continue;
+                    try {
+                        nodeId = api.createEditable(path, name);
+                    } catch (e) {
+                        console.log("Lottie Importer: Could not create shape '" + name + "': " + e.message);
+                        continue;
+                    }
+                    animateShapePath(nodeId, s0.pathKs, yFlip, scaleFactor, s0.groupOffset, tOff);
                 }
-                if (s0.strokeInfo) {
-                    api.setStroke(nodeId, true);
-                    api.set(nodeId, {
-                        "stroke.strokeColor": s0.strokeInfo.color,
-                        "stroke.width": s0.strokeInfo.width * scaleFactor
-                    });
-                }
-                applyTrimPath(nodeId, s0.trimInfo, tOff);
-                animateShapePath(nodeId, s0.pathKs, yFlip, scaleFactor, s0.groupOffset, tOff);
+                applyShapeStyle(nodeId, s0, scaleFactor, tOff);
                 targetIds = [nodeId];
             } else {
                 try {
@@ -1153,7 +1805,12 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                 for (var ss = shapeList.length - 1; ss >= 0; ss--) {
                     var s = shapeList[ss];
                     var subId;
-                    if (s.isCompound && s.compoundPaths) {
+                    if (s.polyStar) {
+                        try {
+                            subId = createPolyStar(s.polyStar, name + " " + (ss + 1), yFlip, scaleFactor, s.groupOffset, compW, compH);
+                        } catch (e) { continue; }
+                        applyShapeStyle(subId, s, scaleFactor, tOff);
+                    } else if (s.isCompound && s.compoundPaths) {
                         var cPath = new cavalry.Path();
                         for (var cp2 = 0; cp2 < s.compoundPaths.length; cp2++) {
                             appendLottiePathToCavalryPath(cPath, s.compoundPaths[cp2].pathData,
@@ -1162,52 +1819,22 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                         try {
                             subId = api.createEditable(cPath, name + " " + (ss + 1));
                         } catch (e) { continue; }
-                        api.setFill(subId, true);
-                        api.set(subId, { "fillRule": 0 });
-                        if (s.gradientInfo) {
-                            applyGradientFill(subId, s.gradientInfo, scaleFactor);
-                        } else {
-                            api.set(subId, { "material.materialColor": s.fillColor });
-                        }
-                        if (s.strokeInfo) {
-                            api.setStroke(subId, true);
-                            api.set(subId, {
-                                "stroke.strokeColor": s.strokeInfo.color,
-                                "stroke.width": s.strokeInfo.width * scaleFactor
-                            });
-                        }
-                        applyTrimPath(subId, s.trimInfo, tOff);
+                        applyShapeStyle(subId, s, scaleFactor, tOff);
                     } else {
+                        if (!s.pathData) continue;
                         var sp = lottiePathToCavalryPath(s.pathData, yFlip, scaleFactor, s.groupOffset);
                         if (!sp) continue;
                         try {
                             subId = api.createEditable(sp, name + " " + (ss + 1));
                         } catch (e) { continue; }
-                        if (s.hasFill) {
-                            api.setFill(subId, true);
-                            api.set(subId, { "fillRule": 1 });
-                            if (s.gradientInfo) {
-                                applyGradientFill(subId, s.gradientInfo, scaleFactor);
-                            } else {
-                                api.set(subId, { "material.materialColor": s.fillColor });
-                            }
-                        } else {
-                            api.setFill(subId, false);
-                        }
-                        if (s.strokeInfo) {
-                            api.setStroke(subId, true);
-                            api.set(subId, {
-                                "stroke.strokeColor": s.strokeInfo.color,
-                                "stroke.width": s.strokeInfo.width * scaleFactor
-                            });
-                        }
-                        applyTrimPath(subId, s.trimInfo, tOff);
+                        applyShapeStyle(subId, s, scaleFactor, tOff);
                         animateShapePath(subId, s.pathKs, yFlip, scaleFactor, s.groupOffset, tOff);
                     }
                     try { api.parent(subId, nodeId); } catch (e) {}
                     targetIds.push(subId);
                 }
             }
+            applyBlendModeToNode(nodeId || targetIds[0], layer.bm);
             applyMasks(layer, targetIds, yFlip, scaleFactor, nodeId, tOff, maskIndexByTarget, null);
             targetIdsByInd[layer.ind] = targetIds;
         } else {
@@ -1358,6 +1985,15 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         if (transform.opacity != null && transform.opacity < 100) {
             setProps["opacity"] = transform.opacity;
         }
+        if (transform.skew && Math.abs(transform.skew) > 0.001) {
+            var skRad = (transform.skewAxis || 0) * Math.PI / 180;
+            var skX = transform.skew * Math.cos(skRad);
+            var skY = transform.skew * Math.sin(skRad);
+            try {
+                setProps["skew.x"] = skX;
+                setProps["skew.y"] = skY;
+            } catch (e) {}
+        }
         api.set(tId, setProps);
         keyframeAnimatedTransforms(tId, tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor, tOff, precompDims, parentPCD);
     }
@@ -1367,6 +2003,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
 
 function importLottie(lottie) {
     gradientCache = {};
+    lottieAssetGroupId = null;
     var compInfo = getCompInfo(lottie);
     var yFlip = true;
 
