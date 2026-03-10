@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.1] - 2026-03-11
+## [1.1.0] - 2026-03-11
 
 ### Added
 - Lottie Importer: import lottie files into Cavalry! This is an early release, there may be incompatibilities or errors.
