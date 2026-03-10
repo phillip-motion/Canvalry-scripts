@@ -9,7 +9,7 @@ These scripts are tools created internally by Canva's motion designers, and are 
   </a>
 </p>
 
-Copy the scripts to your Cavalry Scripts folder.
+Copy the scripts to your Cavalry Scripts folder. 
 
 ## Easey
 
