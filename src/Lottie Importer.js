@@ -8,6 +8,81 @@
 // keyframes, bezier easing, hold keyframes, and group transform propagation.
 // Also: Parenting, track mattes, masks, compound paths, repeaters, precomps.
 
+// Check Update from Github
+var GITHUB_REPO = "phillip-motion/Canvalry-scripts";
+var scriptName = "Lottie Importer";
+var currentVersion = "1.0.0";
+
+function compareVersions(v1, v2) {
+    var parts1 = v1.split('.').map(function(n) { return parseInt(n, 10) || 0; });
+    var parts2 = v2.split('.').map(function(n) { return parseInt(n, 10) || 0; });
+    for (var i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+        var num1 = parts1[i] || 0;
+        var num2 = parts2[i] || 0;
+        if (num1 > num2) return 1;
+        if (num1 < num2) return -1;
+    }
+    return 0;
+}
+
+function checkForUpdate(githubRepo, scriptName, currentVersion, callback) {
+    var now = new Date().getTime();
+    var oneDayAgo = now - (24 * 60 * 60 * 1000);
+    var shouldFetchFromGithub = true;
+    var cachedLatestVersion = null;
+    if (api.hasPreferenceObject(scriptName + "_update_check")) {
+        var prefs = api.getPreferenceObject(scriptName + "_update_check");
+        cachedLatestVersion = prefs.latestVersion;
+        if (prefs.lastCheck && prefs.lastCheck > oneDayAgo) {
+            shouldFetchFromGithub = false;
+        }
+    }
+    if (!shouldFetchFromGithub && cachedLatestVersion) {
+        var updateAvailable = compareVersions(cachedLatestVersion, currentVersion) > 0;
+        if (updateAvailable) {
+            console.warn(scriptName + ' ' + cachedLatestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
+            if (callback) callback(true, cachedLatestVersion);
+        } else {
+            if (callback) callback(false);
+        }
+        return;
+    }
+    try {
+        var path = "/" + githubRepo + "/main/versions.json";
+        var client = new api.WebClient("https://raw.githubusercontent.com");
+        client.get(path);
+        if (client.status() === 200) {
+            var versions = JSON.parse(client.body());
+            var latestVersion = versions[scriptName];
+            if (!latestVersion) {
+                console.warn("Version check: Script name '" + scriptName + "' not found in versions.json");
+                if (callback) callback(false);
+                return;
+            }
+            if (latestVersion.indexOf && latestVersion.indexOf('v') === 0) {
+                latestVersion = latestVersion.substring(1);
+            }
+            api.setPreferenceObject(scriptName + "_update_check", {
+                lastCheck: new Date().getTime(),
+                latestVersion: latestVersion
+            });
+            var updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+            if (updateAvailable) {
+                console.warn(scriptName + ' ' + latestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
+                if (callback) callback(true, latestVersion);
+            } else {
+                if (callback) callback(false);
+            }
+        } else {
+            console.log("Version check: Unable to fetch versions.json (HTTP " + client.status() + ")");
+            if (callback) callback(false);
+        }
+    } catch (e) {
+        console.log("Version check: Error - " + e.message);
+        if (callback) callback(false);
+    }
+}
+
 ui.setTitle("Lottie Importer");
 
 var statusLabel = new ui.Label("Choose a Lottie JSON file to import.");
@@ -60,6 +135,13 @@ importButton.onClick = function() {
 ui.add(statusLabel);
 ui.addSpacing(10);
 ui.add(importButton);
+
+checkForUpdate(GITHUB_REPO, scriptName, currentVersion, function(updateAvailable, newVersion) {
+    if (updateAvailable) {
+        statusLabel.setText("Update " + newVersion + " available!");
+    }
+});
+
 ui.show();
 
 // --- Lottie parsing and layer source ---

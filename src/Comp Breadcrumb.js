@@ -1,6 +1,85 @@
 // Comp Breadcrumb Toolbar for Cavalry
 // Dockable toolbar showing parent composition hierarchy with click-to-navigate
 
+// Check Update from Github
+var GITHUB_REPO = "phillip-motion/Canvalry-scripts";
+var scriptName = "Comp Breadcrumb";
+var currentVersion = "1.0.0";
+
+function compareVersions(v1, v2) {
+    var parts1 = v1.split('.').map(function(n) { return parseInt(n, 10) || 0; });
+    var parts2 = v2.split('.').map(function(n) { return parseInt(n, 10) || 0; });
+    for (var i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+        var num1 = parts1[i] || 0;
+        var num2 = parts2[i] || 0;
+        if (num1 > num2) return 1;
+        if (num1 < num2) return -1;
+    }
+    return 0;
+}
+
+function checkForUpdate(githubRepo, scriptName, currentVersion, callback) {
+    var now = new Date().getTime();
+    var oneDayAgo = now - (24 * 60 * 60 * 1000);
+    var shouldFetchFromGithub = true;
+    var cachedLatestVersion = null;
+    if (api.hasPreferenceObject(scriptName + "_update_check")) {
+        var prefs = api.getPreferenceObject(scriptName + "_update_check");
+        cachedLatestVersion = prefs.latestVersion;
+        if (prefs.lastCheck && prefs.lastCheck > oneDayAgo) {
+            shouldFetchFromGithub = false;
+        }
+    }
+    if (!shouldFetchFromGithub && cachedLatestVersion) {
+        var updateAvailable = compareVersions(cachedLatestVersion, currentVersion) > 0;
+        if (updateAvailable) {
+            console.warn(scriptName + ' ' + cachedLatestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
+            if (callback) callback(true, cachedLatestVersion);
+        } else {
+            if (callback) callback(false);
+        }
+        return;
+    }
+    try {
+        var path = "/" + githubRepo + "/main/versions.json";
+        var client = new api.WebClient("https://raw.githubusercontent.com");
+        client.get(path);
+        if (client.status() === 200) {
+            var versions = JSON.parse(client.body());
+            var latestVersion = versions[scriptName];
+            if (!latestVersion) {
+                console.warn("Version check: Script name '" + scriptName + "' not found in versions.json");
+                if (callback) callback(false);
+                return;
+            }
+            if (latestVersion.indexOf && latestVersion.indexOf('v') === 0) {
+                latestVersion = latestVersion.substring(1);
+            }
+            api.setPreferenceObject(scriptName + "_update_check", {
+                lastCheck: new Date().getTime(),
+                latestVersion: latestVersion
+            });
+            var updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+            if (updateAvailable) {
+                console.warn(scriptName + ' ' + latestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
+                if (callback) callback(true, latestVersion);
+            } else {
+                if (callback) callback(false);
+            }
+        } else {
+            console.log("Version check: Unable to fetch versions.json (HTTP " + client.status() + ")");
+            if (callback) callback(false);
+        }
+    } catch (e) {
+        console.log("Version check: Error - " + e.message);
+        if (callback) callback(false);
+    }
+}
+
+checkForUpdate(GITHUB_REPO, scriptName, currentVersion);
+
+// ---------------------------------------------------------------------------
+
 ui.setToolbar();
 ui.setFixedHeight(32);
 ui.setMargins(0, 0, 0, 0);
@@ -31,32 +110,36 @@ ui.add(scrollView);
 // ---------------------------------------------------------------------------
 
 function buildParentMap() {
+    if (building) return;
     building = true;
-    parentMap = {};
-    var allComps = api.getComps();
-    var savedComp = api.getActiveComp();
+    try {
+        parentMap = {};
+        var allComps = api.getComps();
+        var savedComp = api.getActiveComp();
 
-    for (var i = 0; i < allComps.length; i++) {
-        var comp = allComps[i];
-        try {
-            api.setActiveComp(comp);
-            var refs = api.getCompLayersOfType(false, "compositionReference");
-            for (var r = 0; r < refs.length; r++) {
-                try {
-                    var childComp = api.getCompFromReference(refs[r]);
-                    if (childComp) {
-                        if (!parentMap[childComp]) parentMap[childComp] = [];
-                        if (parentMap[childComp].indexOf(comp) === -1) {
-                            parentMap[childComp].push(comp);
+        for (var i = 0; i < allComps.length; i++) {
+            var comp = allComps[i];
+            try {
+                api.setActiveComp(comp);
+                var refs = api.getCompLayersOfType(false, "compositionReference");
+                for (var r = 0; r < refs.length; r++) {
+                    try {
+                        var childComp = api.getCompFromReference(refs[r]);
+                        if (childComp) {
+                            if (!parentMap[childComp]) parentMap[childComp] = [];
+                            if (parentMap[childComp].indexOf(comp) === -1) {
+                                parentMap[childComp].push(comp);
+                            }
                         }
-                    }
-                } catch (e) {}
-            }
-        } catch (e) {}
-    }
+                    } catch (e) {}
+                }
+            } catch (e) {}
+        }
 
-    api.setActiveComp(savedComp);
-    building = false;
+        if (savedComp) api.setActiveComp(savedComp);
+    } finally {
+        building = false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +147,7 @@ function buildParentMap() {
 // ---------------------------------------------------------------------------
 
 function recordVisit(compId) {
+    if (!compId) return;
     var idx = visitHistory.indexOf(compId);
     if (idx !== -1) visitHistory.splice(idx, 1);
     visitHistory.push(compId);
@@ -92,6 +176,7 @@ function pickParent(compId) {
 // ---------------------------------------------------------------------------
 
 function getAncestorChain(compId) {
+    if (!compId) return [];
     var chain = [compId];
     var visited = {};
     visited[compId] = true;
@@ -112,6 +197,16 @@ function getAncestorChain(compId) {
 // ---------------------------------------------------------------------------
 
 function validateNavPath() {
+    var activeComp = api.getActiveComp();
+    if (!activeComp) {
+        navPath = [];
+        activeIndex = -1;
+        return;
+    }
+
+    var allComps = api.getComps();
+    navPath = navPath.filter(function(id) { return allComps.indexOf(id) !== -1; });
+
     // Check each consecutive parent-child link; truncate at first broken one
     for (var i = 1; i < navPath.length; i++) {
         var parents = parentMap[navPath[i]];
@@ -122,7 +217,6 @@ function validateNavPath() {
     }
 
     // Make sure the active comp is still in the path
-    var activeComp = api.getActiveComp();
     var idx = navPath.indexOf(activeComp);
     if (idx === -1) {
         navPath = getAncestorChain(activeComp);
@@ -134,6 +228,12 @@ function validateNavPath() {
 
 function handleCompChanged() {
     var newComp = api.getActiveComp();
+    if (!newComp) {
+        navPath = [];
+        activeIndex = -1;
+        renderBreadcrumb();
+        return;
+    }
     recordVisit(newComp);
 
     // Already in navPath? Just move the cursor (preserves forward elements)
@@ -181,6 +281,14 @@ var baseColor = ui.getThemeColor("Base");
 function renderBreadcrumb() {
     breadcrumbLayout.clear();
 
+    if (navPath.length === 0) {
+        var emptyLabel = new ui.Label("No comp");
+        emptyLabel.setTextColor(midColor);
+        breadcrumbLayout.add(emptyLabel);
+        breadcrumbLayout.addStretch();
+        return;
+    }
+
     for (var i = 0; i < navPath.length; i++) {
         if (i > 0) {
             var sep = new ui.Label("  >  ");
@@ -193,7 +301,12 @@ function renderBreadcrumb() {
         var isForward = (i > activeIndex);
         var hasMultipleParents = parentMap[compId] && parentMap[compId].length > 1;
 
-        var name = api.getNiceName(compId);
+        var name;
+        try {
+            name = api.getNiceName(compId);
+        } catch (e) {
+            name = "<deleted>";
+        }
         var label = new ui.Label(name.replace(/ /g, "\u00A0"));
         label.setToolTip(name);
         if (isActive) {
@@ -252,25 +365,35 @@ popover.setLayout(popoverLayout);
 popover.setRadius(4, 4, 4, 4);
 
 function showParentMenu(compId, sourceContainer) {
-    var parents = parentMap[compId];
-    if (!parents || parents.length <= 1) return;
+    try {
+        var parents = parentMap[compId];
+        if (!parents || parents.length <= 1) return;
 
-    popoverLayout.clear();
+        popoverLayout.clear();
 
-    for (var i = 0; i < parents.length; i++) {
-        (function(pid) {
-            var btn = new ui.Button(api.getNiceName(pid));
-            btn.onClick = function() {
-                popover.close();
-                api.setActiveComp(pid);
-            };
-            popoverLayout.add(btn);
-        })(parents[i]);
+        for (var i = 0; i < parents.length; i++) {
+            (function(pid) {
+                var btnLabel;
+                try {
+                    btnLabel = api.getNiceName(pid);
+                } catch (e) {
+                    btnLabel = "<deleted>";
+                }
+                var btn = new ui.Button(btnLabel);
+                btn.onClick = function() {
+                    popover.close();
+                    api.setActiveComp(pid);
+                };
+                popoverLayout.add(btn);
+            })(parents[i]);
+        }
+
+        var geo = sourceContainer.geometry();
+        popover.setPreferredPopoverSide(0);
+        popover.showAsPopover(geo.left, geo.bottom);
+    } catch (e) {
+        console.log("Comp Breadcrumb showParentMenu: " + e);
     }
-
-    var geo = sourceContainer.geometry();
-    popover.setPreferredPopoverSide(0);
-    popover.showAsPopover(geo.left, geo.bottom);
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +412,10 @@ function Callbacks() {
         activeIndex = -1;
         buildParentMap();
         var comp = api.getActiveComp();
+        if (!comp) {
+            renderBreadcrumb();
+            return;
+        }
         recordVisit(comp);
         navPath = getAncestorChain(comp);
         activeIndex = navPath.length - 1;
@@ -322,11 +449,23 @@ ui.addCallbackObject(new Callbacks());
 // Initial setup
 // ---------------------------------------------------------------------------
 
-buildParentMap();
-var initComp = api.getActiveComp();
-recordVisit(initComp);
-navPath = getAncestorChain(initComp);
-activeIndex = navPath.length - 1;
-renderBreadcrumb();
+try {
+    buildParentMap();
+    var initComp = api.getActiveComp();
+    if (!initComp) {
+        navPath = [];
+        activeIndex = -1;
+    } else {
+        recordVisit(initComp);
+        navPath = getAncestorChain(initComp);
+        activeIndex = navPath.length - 1;
+    }
+    renderBreadcrumb();
+} catch (e) {
+    console.log("Comp Breadcrumb init: " + e);
+    navPath = [];
+    activeIndex = -1;
+    renderBreadcrumb();
+}
 
 ui.show();
