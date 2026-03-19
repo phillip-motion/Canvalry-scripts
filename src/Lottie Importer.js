@@ -1535,21 +1535,15 @@ function animateCompoundShapePaths(shapeId, compoundPaths, yFlip, scaleFactor, t
     }
 }
 
-// Cavalry clipping mask mode enum (per product mapping):
+// Cavalry clipping mask mode enum:
 //   0 = Union, 1 = Subtract, 2 = Intersect, 3 = Difference
 //
-// Lottie mode "a" (AE Add) is position-dependent: AE/lottie-web evaluate masks in order.
-// The *first* Add defines the initial visible region (clip-to-shape) -> Intersect (2).
-// Later Adds union more area -> Union (0). Same letter "a", different stack roles.
-// addOrdinal: 0 = first Add in masksProperties, 1+ = later Adds. Omit / use -1 for
-// synthetic full-comp base only -> always Union (0).
-// Nested Intersect: lottie-web can nest groups; we use a flat list (see applyMasks).
-function lottieMaskModeToCavalry(mode, addOrdinal) {
-    if (mode === "a") {
-        if (addOrdinal === -1) return 0; // lottie-web white rect base
-        if (addOrdinal === 0) return 2; // first Add -> Intersect
-        return 0; // subsequent Adds -> Union
-    }
+// AE/lottie-web evaluate masks sequentially. The first Add defines the initial
+// visible region (clip-to-shape -> Intersect). Later Adds union more area.
+// With nested groups each shape gets exactly one mask, so isFirstMask distinguishes
+// the innermost clip from subsequent wrappers.
+function lottieMaskModeToCavalry(mode, isFirstMask) {
+    if (mode === "a") return isFirstMask ? 2 : 0; // first Add -> Intersect; later -> Union
     if (mode === "s") return 1;
     if (mode === "i") return 2;
     if (mode === "f") return 3;
@@ -1613,127 +1607,211 @@ function tryApplyLottieMaskExtras(mask, maskId, tgt, maskSlotIdx, timeOffset) {
     }
 }
 
+// Create a single mask shape node (hidden, parented, with keyframes + easing).
+function createSingleMaskShape(maskData, label, yFlip, scaleFactor, maskOff, parentId, tOff) {
+    var pt = maskData.pt;
+    if (!pt) return null;
+    var pathData = getPathDataFromShapeKs(pt);
+    if (!pathData) return null;
+    var path = lottiePathToCavalryPath(pathData, yFlip, scaleFactor, maskOff);
+    if (!path) return null;
+    var maskId;
+    try {
+        maskId = api.createEditable(path, label);
+    } catch (e) { return null; }
+    api.set(maskId, { "hidden": true });
+    try { api.parent(maskId, parentId); } catch (e) {}
+    if (pt.a === 1 && pt.k && pt.k.length > 1) {
+        var maskKfCount = 0;
+        for (var kf = 0; kf < pt.k.length; kf++) {
+            var kfData = getPathDataAtKeyframe(pt, kf);
+            if (!kfData) continue;
+            var frame = getKeyframeTime(pt, kf) + tOff;
+            var contour = lottiePathToContourData(kfData, yFlip, scaleFactor, maskOff);
+            if (!contour) continue;
+            try {
+                api.keyframe(maskId, frame, { "inputPath": contour });
+                maskKfCount++;
+            } catch (e) {
+                console.log("Lottie Importer: Mask keyframe failed at frame " + frame + ": " + e.message);
+            }
+        }
+        if (maskKfCount > 0) {
+            applyPathEasing(maskId, "inputPath", pt.k, tOff);
+        }
+    }
+    return maskId;
+}
+
+// Create a compound mask shape (multi-contour) from several mask entries.
+// entries: array of { mask: maskData, origIndex: number }
+function createCompoundMaskShape(entries, label, yFlip, scaleFactor, maskOff, parentId, tOff) {
+    var combinedPath = new cavalry.Path();
+    var compPaths = [];
+    for (var i = 0; i < entries.length; i++) {
+        var pd = getPathDataFromShapeKs(entries[i].mask.pt);
+        if (!pd) continue;
+        appendLottiePathToCavalryPath(combinedPath, pd, yFlip, scaleFactor, maskOff);
+        compPaths.push({ pathKs: entries[i].mask.pt, pathData: pd, groupOffset: maskOff });
+    }
+    if (compPaths.length === 0) return null;
+    var maskId;
+    try {
+        maskId = api.createEditable(combinedPath, label);
+    } catch (e) { return null; }
+    api.set(maskId, { "hidden": true });
+    try { api.parent(maskId, parentId); } catch (e) {}
+    animateCompoundShapePaths(maskId, compPaths, yFlip, scaleFactor, tOff);
+    return maskId;
+}
+
+// Connect a single mask shape to a target node at masks.0 with the given mode.
+function connectSingleMask(maskId, tgt, cavMaskMode, maskData, tOff) {
+    try {
+        api.addArrayIndex(tgt, "masks");
+        api.connect(maskId, "id", tgt, "masks.0.id");
+        api.set(tgt, { "masks.0.mode": cavMaskMode });
+        if (maskData) tryApplyLottieMaskExtras(maskData, maskId, tgt, 0, tOff);
+    } catch (e) {
+        console.log("Lottie Importer: Mask connect failed: " + e.message);
+    }
+}
+
 // --- Apply Lottie masks as Cavalry clipping masks ---
-// Reference: lottie-web `player/js/mask.js` — masks are applied in `masksProperties`
-// array order. lottie-web prepends a full-comp white rect when the first contributing
-// mask is subtract ('s') or intersect ('i'); we inject an equivalent Union (Add) base.
-// Masks are connected in the same order as Lottie indices (after any injected base).
+// Reference: lottie-web `player/js/mask.js` — masks are evaluated sequentially.
 //
-// LIMITATION — Intersect nesting: lottie-web wraps prior masks in a group and applies
-// mode 'i' as a nested SVG mask. Cavalry uses a flat clipping-mask list with combined
-// boolean modes; stacks with multiple Intersects may not match lottie-web/AE exactly.
+// Cavalry's multi-mask-per-shape feature is unreliable, so we avoid it entirely.
+// Strategy: consecutive Add ("a") masks are merged into a single compound editable
+// shape (multi-contour) and applied as one Intersect mask — this faithfully
+// reproduces the union of Add regions. Non-Add masks (Subtract, Intersect,
+// Difference) each get a nested wrapper group around the target, so every node
+// only ever has ONE clipping mask connected.
 //
-// precompDims: optional {w, h} — shifts mask coords by [-w/2,-h/2]; when set, defines
-// synthetic base rect size (inner comp).
-// maskBounds: optional {w, h} — root / current comp size when precompDims is null; used
-// for synthetic base rect and required for correct first-mask Subtract/Intersect behavior.
+// When the first effective mask is subtract ('s') or intersect ('i'), lottie-web
+// prepends a full-comp white rect; we merge it into the first Add compound.
+//
+// precompDims: optional {w, h} — shifts mask coords by [-w/2,-h/2] and provides
+//   synthetic base rect size for inner comps.
+// maskBounds: optional {w, h} — comp size when precompDims is null; used for
+//   synthetic base rect.
 function applyMasks(layer, targetIds, yFlip, scaleFactor, nodeId, timeOffset, maskIndexByTarget, precompDims, maskBounds) {
     var masks = layer.masksProperties;
     if (!masks || !targetIds || targetIds.length === 0) return;
     var tOff = timeOffset || 0;
     var maskOff = precompDims ? [-precompDims.w / 2, -precompDims.h / 2] : [0, 0];
 
-    var baseW = 0;
-    var baseH = 0;
-    if (precompDims && precompDims.w > 0 && precompDims.h > 0) {
-        baseW = precompDims.w;
-        baseH = precompDims.h;
-    } else if (maskBounds && maskBounds.w > 0 && maskBounds.h > 0) {
-        baseW = maskBounds.w;
-        baseH = maskBounds.h;
+    // Collect effective masks (skip "n" and missing pt)
+    var effective = [];
+    for (var em = 0; em < masks.length; em++) {
+        var emk = masks[em];
+        if (emk.mode === "n") continue;
+        if (!emk.pt) continue;
+        if (!getPathDataFromShapeKs(emk.pt)) continue;
+        effective.push({ mask: emk, origIndex: em });
     }
+    if (effective.length === 0) return;
 
-    var firstMode = getFirstEffectiveMaskMode(masks);
-    if ((firstMode === "s" || firstMode === "i") && baseW > 0 && baseH > 0) {
-        var basePathData = buildFullCompMaskPathData(baseW, baseH);
-        var basePath = lottiePathToCavalryPath(basePathData, yFlip, scaleFactor, maskOff);
-        if (basePath) {
-            try {
-                var baseMaskId = api.createEditable(basePath, "Mask base (lottie-web)");
-                api.set(baseMaskId, { "hidden": true });
-                try { api.parent(baseMaskId, nodeId); } catch (eP) {}
-                var unionMode = lottieMaskModeToCavalry("a", -1);
-                for (var tb = 0; tb < targetIds.length; tb++) {
-                    var tgtB = targetIds[tb];
-                    var idxB = (maskIndexByTarget && maskIndexByTarget[tgtB]) ? maskIndexByTarget[tgtB] : 0;
-                    try {
-                        api.addArrayIndex(tgtB, "masks");
-                        api.connect(baseMaskId, "id", tgtB, "masks." + idxB + ".id");
-                        var modeObjB = {};
-                        modeObjB["masks." + idxB + ".mode"] = unionMode;
-                        api.set(tgtB, modeObjB);
-                        if (maskIndexByTarget) maskIndexByTarget[tgtB] = idxB + 1;
-                        console.log("Lottie Importer: Injected lottie-web-style full-comp Union base mask -> " + tgtB);
-                    } catch (eB) {
-                        console.log("Lottie Importer: Base mask connect failed: " + eB.message);
-                    }
-                }
-            } catch (eCreate) {
-                console.log("Lottie Importer: Could not create base mask: " + eCreate.message);
-            }
+    // If first effective mask is s or i, prepend a synthetic "a" base rect
+    var firstMode = effective[0].mask.mode;
+    var needsBase = (firstMode === "s" || firstMode === "i");
+    if (needsBase) {
+        var baseW = 0, baseH = 0;
+        if (precompDims && precompDims.w > 0 && precompDims.h > 0) {
+            baseW = precompDims.w; baseH = precompDims.h;
+        } else if (maskBounds && maskBounds.w > 0 && maskBounds.h > 0) {
+            baseW = maskBounds.w; baseH = maskBounds.h;
+        }
+        if (baseW > 0 && baseH > 0) {
+            var basePd = buildFullCompMaskPathData(baseW, baseH);
+            effective.unshift({
+                mask: { mode: "a", pt: { a: 0, k: basePd } },
+                origIndex: -1
+            });
         }
     }
 
-    var lottieAddOrdinal = 0; // 0 = first Add ("a") on layer, then 1, 2, ...
-
-    for (var m = 0; m < masks.length; m++) {
-        var mask = masks[m];
-        if (mask.mode === "n") continue; // None — not part of clipping stack (lottie-web)
-        var pt = mask.pt;
-        if (!pt) continue;
-        var pathData = getPathDataFromShapeKs(pt);
-        if (!pathData) continue;
-        var path = lottiePathToCavalryPath(pathData, yFlip, scaleFactor, maskOff);
-        if (!path) continue;
-        var maskId;
-        try {
-            maskId = api.createEditable(path, "Mask " + m);
-        } catch (e) { continue; }
-        api.set(maskId, { "hidden": true });
-        try { api.parent(maskId, nodeId); } catch (e) {}
-        if (pt.a === 1 && pt.k && pt.k.length > 1) {
-            var maskKfCount = 0;
-            for (var kf = 0; kf < pt.k.length; kf++) {
-                var kfData = getPathDataAtKeyframe(pt, kf);
-                if (!kfData) continue;
-                var frame = getKeyframeTime(pt, kf) + tOff;
-                var contour = lottiePathToContourData(kfData, yFlip, scaleFactor, maskOff);
-                if (!contour) continue;
-                try {
-                    api.keyframe(maskId, frame, { "inputPath": contour });
-                    maskKfCount++;
-                } catch (e) {
-                    console.log("Lottie Importer: Mask keyframe failed at frame " + frame + ": " + e.message);
-                }
-            }
-            if (maskKfCount > 0) {
-                console.log("Lottie Importer: Applied " + maskKfCount + " keyframes to mask " + m);
-                applyPathEasing(maskId, "inputPath", pt.k, tOff);
-            }
-        }
-        var cavMaskMode;
-        if (mask.mode === "a") {
-            cavMaskMode = lottieMaskModeToCavalry("a", lottieAddOrdinal);
-            lottieAddOrdinal++;
+    // Group consecutive masks into segments:
+    //   "add" segment = one or more consecutive "a" masks → compound shape
+    //   "single" segment = one non-"a" mask → individual shape
+    var segments = [];
+    var curAdds = [];
+    for (var si = 0; si < effective.length; si++) {
+        if (effective[si].mask.mode === "a") {
+            curAdds.push(effective[si]);
         } else {
-            cavMaskMode = lottieMaskModeToCavalry(mask.mode);
-        }
-        for (var t = 0; t < targetIds.length; t++) {
-            var tgt = targetIds[t];
-            var idx = (maskIndexByTarget && maskIndexByTarget[tgt]) ? maskIndexByTarget[tgt] : 0;
-            try {
-                api.addArrayIndex(tgt, "masks");
-                api.connect(maskId, "id", tgt, "masks." + idx + ".id");
-                var modeObj = {};
-                modeObj["masks." + idx + ".mode"] = cavMaskMode;
-                api.set(tgt, modeObj);
-                if (maskIndexByTarget) maskIndexByTarget[tgt] = idx + 1;
-                tryApplyLottieMaskExtras(mask, maskId, tgt, idx, tOff);
-                console.log("Lottie Importer: Connected mask " + m + " (mode: " + mask.mode + " -> cav " + cavMaskMode + ") to " + tgt + " at index " + idx);
-            } catch (e) {
-                console.log("Lottie Importer: Mask connect failed for " + tgt + " at index " + idx + ": " + e.message);
+            if (curAdds.length > 0) {
+                segments.push({ type: "add", entries: curAdds });
+                curAdds = [];
             }
+            segments.push({ type: "single", entry: effective[si] });
         }
+    }
+    if (curAdds.length > 0) segments.push({ type: "add", entries: curAdds });
+    if (segments.length === 0) return;
+
+    // Pre-create mask shape nodes (shared across all targets)
+    var segShapeIds = [];
+    for (var sg = 0; sg < segments.length; sg++) {
+        var seg = segments[sg];
+        var shapeId = null;
+        if (seg.type === "add") {
+            var indices = [];
+            for (var ai = 0; ai < seg.entries.length; ai++) indices.push(seg.entries[ai].origIndex);
+            var label = "Mask Add [" + indices.join(",") + "]";
+            if (seg.entries.length === 1) {
+                shapeId = createSingleMaskShape(seg.entries[0].mask, label, yFlip, scaleFactor, maskOff, nodeId, tOff);
+            } else {
+                shapeId = createCompoundMaskShape(seg.entries, label, yFlip, scaleFactor, maskOff, nodeId, tOff);
+            }
+        } else {
+            var sLabel = "Mask " + seg.entry.origIndex;
+            shapeId = createSingleMaskShape(seg.entry.mask, sLabel, yFlip, scaleFactor, maskOff, nodeId, tOff);
+        }
+        segShapeIds.push(shapeId);
+    }
+
+    // Determine if we can skip wrapping (single segment, no nesting needed)
+    var singleSegment = (segments.length === 1);
+
+    for (var ti = 0; ti < targetIds.length; ti++) {
+        var currentNode = targetIds[ti];
+
+        if (singleSegment && segShapeIds[0]) {
+            // One segment only — connect directly to the target, no wrapper
+            var seg0 = segments[0];
+            var mode0 = lottieMaskModeToCavalry(seg0.type === "add" ? "a" : seg0.entry.mask.mode, true);
+            connectSingleMask(segShapeIds[0], currentNode, mode0,
+                seg0.type === "add" ? seg0.entries[0].mask : seg0.entry.mask, tOff);
+            console.log("Lottie Importer: Direct mask -> " + currentNode + " (cav mode " + mode0 + ")");
+            continue;
+        }
+
+        // Multiple segments: nest inside-out. Segment 0 is innermost (first eval).
+        for (var wi = 0; wi < segments.length; wi++) {
+            var mShapeId = segShapeIds[wi];
+            if (!mShapeId) continue;
+            var wseg = segments[wi];
+            var isFirst = (wi === 0);
+            var wMode;
+            if (wseg.type === "add") {
+                wMode = lottieMaskModeToCavalry("a", isFirst);
+            } else {
+                wMode = lottieMaskModeToCavalry(wseg.entry.mask.mode, isFirst);
+            }
+
+            var wrapper;
+            try {
+                wrapper = createGroup("Mask wrapper " + wi);
+            } catch (e) { continue; }
+            try { api.parent(currentNode, wrapper); } catch (e) {}
+            connectSingleMask(mShapeId, wrapper, wMode,
+                wseg.type === "add" ? wseg.entries[0].mask : wseg.entry.mask, tOff);
+            console.log("Lottie Importer: Mask segment " + wi + " (cav mode " + wMode + ") nested wrapper " + wrapper);
+            currentNode = wrapper;
+        }
+
+        // Outermost wrapper takes the target's original place in the hierarchy
+        try { api.parent(currentNode, nodeId); } catch (e) {}
     }
 }
 
@@ -2025,7 +2103,7 @@ function createTextLayer(layer, name, yFlip, scaleFactor, compW, compH) {
 // groupId: if provided, top-level layers are parented to this group and all
 // layers are treated as having a parent (no root-comp centering on positions).
 // timeOffset: accumulated precomp st offset for keyframe times.
-function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupId, timeOffset, precompCache, frameRate) {
+function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupId, timeOffset, precompCache, frameRate, compWorkArea) {
     var tOff = timeOffset || 0;
     var parentIndSet = {};
     for (var i = 0; i < layers.length; i++) {
@@ -2036,6 +2114,13 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
     for (var i = 0; i < layers.length; i++) {
         var l = layers[i];
         if (l.hd === true) continue;
+        if (compWorkArea && !parentIndSet[l.ind]) {
+            var lIp = l.ip != null ? Math.round(l.ip) : 0;
+            var lOp = l.op != null ? Math.round(l.op) : Infinity;
+            if (lIp >= compWorkArea.op || lOp <= compWorkArea.ip) {
+                continue;
+            }
+        }
         if (l.ty === 0) {
             processLayers.push({ index: i, layer: l, kind: "precomp", precompW: l.w || 0, precompH: l.h || 0 });
         } else if (l.ty === 1) {
@@ -2284,45 +2369,54 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                     appendLottiePathToCavalryPath(combinedPath, s0c.compoundPaths[cp].pathData,
                         yFlip, scaleFactor, s0c.compoundPaths[cp].groupOffset);
                 }
+                var shapeId;
                 try {
-                    nodeId = api.createEditable(combinedPath, name);
+                    shapeId = api.createEditable(combinedPath, name);
                 } catch (e) {
                     console.log("Lottie Importer: Could not create compound shape '" + name + "': " + e.message);
                     continue;
                 }
-                applyShapeStyle(nodeId, s0c, scaleFactor, tOff);
-                animateCompoundShapePaths(nodeId, s0c.compoundPaths, yFlip, scaleFactor, tOff);
-                targetIds = [nodeId];
+                applyShapeStyle(shapeId, s0c, scaleFactor, tOff);
+                animateCompoundShapePaths(shapeId, s0c.compoundPaths, yFlip, scaleFactor, tOff);
+                try { nodeId = createGroup(name); } catch (e) { nodeId = shapeId; }
+                if (nodeId !== shapeId) { try { api.parent(shapeId, nodeId); } catch (e) {} }
+                targetIds = [shapeId];
             } else if (shapeList.length === 1 && shapeList[0].polyStar) {
                 var ps0 = shapeList[0];
+                var psId;
                 try {
-                    nodeId = createPolyStar(ps0.polyStar, name, yFlip, scaleFactor, ps0.groupOffset, compW, compH);
+                    psId = createPolyStar(ps0.polyStar, name, yFlip, scaleFactor, ps0.groupOffset, compW, compH);
                 } catch (e) {
                     console.log("Lottie Importer: Could not create PolyStar '" + name + "': " + e.message);
                     continue;
                 }
-                applyShapeStyle(nodeId, ps0, scaleFactor, tOff);
-                targetIds = [nodeId];
+                applyShapeStyle(psId, ps0, scaleFactor, tOff);
+                try { nodeId = createGroup(name); } catch (e) { nodeId = psId; }
+                if (nodeId !== psId) { try { api.parent(psId, nodeId); } catch (e) {} }
+                targetIds = [psId];
             } else if (shapeList.length === 1) {
                 var s0 = shapeList[0];
                 if (!s0.pathData && !s0.polyStar) continue;
+                var sId;
                 if (s0.polyStar) {
                     try {
-                        nodeId = createPolyStar(s0.polyStar, name, yFlip, scaleFactor, s0.groupOffset, compW, compH);
+                        sId = createPolyStar(s0.polyStar, name, yFlip, scaleFactor, s0.groupOffset, compW, compH);
                     } catch (e) { continue; }
                 } else {
                     var path = lottiePathToCavalryPath(s0.pathData, yFlip, scaleFactor, s0.groupOffset);
                     if (!path) continue;
                     try {
-                        nodeId = api.createEditable(path, name);
+                        sId = api.createEditable(path, name);
                     } catch (e) {
                         console.log("Lottie Importer: Could not create shape '" + name + "': " + e.message);
                         continue;
                     }
-                    animateShapePath(nodeId, s0.pathKs, yFlip, scaleFactor, s0.groupOffset, tOff);
+                    animateShapePath(sId, s0.pathKs, yFlip, scaleFactor, s0.groupOffset, tOff);
                 }
-                applyShapeStyle(nodeId, s0, scaleFactor, tOff);
-                targetIds = [nodeId];
+                applyShapeStyle(sId, s0, scaleFactor, tOff);
+                try { nodeId = createGroup(name); } catch (e) { nodeId = sId; }
+                if (nodeId !== sId) { try { api.parent(sId, nodeId); } catch (e) {} }
+                targetIds = [sId];
             } else {
                 try {
                     nodeId = createGroup(name);
@@ -2374,8 +2468,12 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         createdIds.push(nodeId);
         createdLayers.push(entry);
 
-        if (layer.ip != null) api.setInFrame(nodeId, layer.ip + tOff);
-        if (layer.op != null) api.setOutFrame(nodeId, layer.op + tOff);
+        try {
+            if (layer.ip != null) api.setInFrame(nodeId, Math.round(layer.ip + tOff));
+            if (layer.op != null) api.setOutFrame(nodeId, Math.round(layer.op + tOff));
+        } catch (e) {
+            console.log("Lottie Importer: setInFrame/setOutFrame failed for '" + name + "': " + e.message);
+        }
     }
 
     // Build ind→layer lookup for frame-range expansion below
@@ -2396,8 +2494,8 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         if (!matteNodeId) continue;
         try {
             var matteProxyId = createGroup((layers[mi].nm || "Matte") + " [parent]");
-            if (layers[mi].ip != null) { try { api.setInFrame(matteProxyId, layers[mi].ip + tOff); } catch (e) {} }
-            if (layers[mi].op != null) { try { api.setOutFrame(matteProxyId, layers[mi].op + tOff); } catch (e) {} }
+            if (layers[mi].ip != null) { try { api.setInFrame(matteProxyId, Math.round(layers[mi].ip + tOff)); } catch (e) {} }
+            if (layers[mi].op != null) { try { api.setOutFrame(matteProxyId, Math.round(layers[mi].op + tOff)); } catch (e) {} }
             matteProxyByInd[matteInd2] = matteProxyId;
         } catch (e) {
             console.log("Lottie Importer: Could not create matte proxy for '" + layers[mi].nm + "': " + e.message);
@@ -2446,10 +2544,10 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             // range; Cavalry hides children of inactive parents, so expand.
             var frP = layerByInd[uLayer.parent];
             if (frP && uLayer.ip != null && frP.ip != null && uLayer.ip < frP.ip) {
-                try { api.setInFrame(uParentId, uLayer.ip + tOff); frP.ip = uLayer.ip; } catch (e) {}
+                try { api.setInFrame(uParentId, Math.round(uLayer.ip + tOff)); frP.ip = uLayer.ip; } catch (e) {}
             }
             if (frP && uLayer.op != null && frP.op != null && uLayer.op > frP.op) {
-                try { api.setOutFrame(uParentId, uLayer.op + tOff); frP.op = uLayer.op; } catch (e) {}
+                try { api.setOutFrame(uParentId, Math.round(uLayer.op + tOff)); frP.op = uLayer.op; } catch (e) {}
             }
         } else if (groupId) {
             try { api.parent(uNodeId, groupId); } catch (e) {}
@@ -2461,8 +2559,8 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         var proxyFrId = idByInd[processLayers[pfr].layer.ind];
         var realPFrL = layerByInd[processLayers[pfr].proxyForInd];
         if (proxyFrId && realPFrL) {
-            if (realPFrL.ip != null) { try { api.setInFrame(proxyFrId, realPFrL.ip + tOff); } catch (e) {} }
-            if (realPFrL.op != null) { try { api.setOutFrame(proxyFrId, realPFrL.op + tOff); } catch (e) {} }
+            if (realPFrL.ip != null) { try { api.setInFrame(proxyFrId, Math.round(realPFrL.ip + tOff)); } catch (e) {} }
+            if (realPFrL.op != null) { try { api.setOutFrame(proxyFrId, Math.round(realPFrL.op + tOff)); } catch (e) {} }
         }
     }
     // Matte proxy groups: parent to grandparent (the matte source's parent)
@@ -2676,8 +2774,8 @@ function importLottie(lottie) {
         } catch (e) {}
         try {
             if (api.hasAttribute(activeComp, "fps")) api.set(activeComp, { "fps": compInfo.fr });
-            if (api.hasAttribute(activeComp, "startFrame")) api.set(activeComp, { "startFrame": compInfo.ip });
-            if (api.hasAttribute(activeComp, "endFrame")) api.set(activeComp, { "endFrame": compInfo.op });
+            if (api.hasAttribute(activeComp, "startFrame")) api.set(activeComp, { "startFrame": Math.round(compInfo.ip) });
+            if (api.hasAttribute(activeComp, "endFrame")) api.set(activeComp, { "endFrame": Math.round(compInfo.op) });
         } catch (e) {}
     }
 
@@ -2691,7 +2789,8 @@ function importLottie(lottie) {
     }
 
     var precompCache = {};
-    var allCreatedIds = importLayerSet(rootLayers, assets, yFlip, scaleFactor, compInfo.w, compInfo.h, null, 0, precompCache, compInfo.fr);
+    var workArea = { ip: Math.round(compInfo.ip), op: Math.round(compInfo.op) };
+    var allCreatedIds = importLayerSet(rootLayers, assets, yFlip, scaleFactor, compInfo.w, compInfo.h, null, 0, precompCache, compInfo.fr, workArea);
 
     var precompIds = [];
     for (var key in precompCache) {
