@@ -1395,8 +1395,8 @@ function animateShapePath(shapeId, pathKs, yFlip, scaleFactor, groupOffset, time
 }
 
 function lottieMaskModeToCavalry(mode) {
-    if (mode === "s") return 1; // Subtract
-    if (mode === "a" || mode === "i") return 2; // Intersect
+    if (mode === "s") return 3; // Subtract -> Exclude
+    if (mode === "a" || mode === "i") return 2; // Add/Intersect -> Intersect
     return 2; // default to Intersect
 }
 
