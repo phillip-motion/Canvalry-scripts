@@ -127,8 +127,10 @@ importButton.onClick = function() {
         var count = importLottie(lottie);
         statusLabel.setText("Imported " + count + " shape layer(s).");
     } catch (e) {
-        console.log("Lottie import error: " + e.message);
-        statusLabel.setText("Error: " + e.message);
+        var errMsg = (e && e.message) ? e.message : String(e);
+        if (e && e.stack) console.log("Lottie import stack: " + e.stack);
+        console.log("Lottie import error: " + errMsg);
+        statusLabel.setText("Error: " + errMsg);
     }
 };
 
@@ -283,12 +285,16 @@ function getPathDataFromShapeKs(ks) {
         var sk = ks.k[0].s;
         return normalizeLottiePathShape(sk);
     }
+    if (ks.k && Array.isArray(ks.k) && ks.k.length > 0 && ks.k[0] && typeof ks.k[0] === "object" && ks.k[0].s !== undefined) {
+        return normalizeLottiePathShape(ks.k[0].s);
+    }
     return null;
 }
 
 function getPathDataAtKeyframe(ks, keyframeIndex) {
-    if (!ks || ks.a !== 1 || !ks.k || !ks.k[keyframeIndex]) return null;
+    if (!ks || !ks.k || !ks.k[keyframeIndex]) return null;
     var s = ks.k[keyframeIndex].s;
+    if (s === undefined) return null;
     return normalizeLottiePathShape(s);
 }
 
@@ -297,11 +303,38 @@ function getKeyframeTime(ks, keyframeIndex) {
     return ks.k[keyframeIndex].t != null ? ks.k[keyframeIndex].t : 0;
 }
 
+// Lottie 5.7+ often omits "a":1 when k is already a keyframe array [{t,s,i,o}, ...].
+function isLottieKeyframeStyleArray(k) {
+    if (!k || !Array.isArray(k) || k.length === 0) return false;
+    var f = k[0];
+    if (f == null || typeof f !== "object") return false;
+    return f.s !== undefined || f.t !== undefined || f.h !== undefined || f.i !== undefined || f.o !== undefined;
+}
+
+function pathKsIsAnimated(ks) {
+    if (!ks || !ks.k || !Array.isArray(ks.k) || ks.k.length <= 1) return false;
+    if (ks.a === 1) return true;
+    return isLottieKeyframeStyleArray(ks.k);
+}
+
+function singleValuePropIsAnimated(ks) {
+    if (!ks || !ks.k || !Array.isArray(ks.k) || ks.k.length <= 1) return false;
+    if (ks.a === 1) return true;
+    return isLottieKeyframeStyleArray(ks.k);
+}
+
 // --- Extract static value from Lottie transform property (handles animated) ---
 function getStaticValue(prop, fallback) {
     if (!prop) return fallback;
     if (prop.a === 1 && prop.k && prop.k.length > 0 && prop.k[0].s !== undefined) {
         return prop.k[0].s;
+    }
+    // Keyframed but "a" omitted: k is [{s,t,...}, ...] — use first keyframe value
+    if (prop.k && Array.isArray(prop.k) && prop.k.length > 0) {
+        var k0 = prop.k[0];
+        if (k0 && typeof k0 === "object" && k0.s !== undefined) {
+            return k0.s;
+        }
     }
     if (prop.k !== undefined) return prop.k;
     return fallback;
@@ -602,8 +635,8 @@ function extractStrokeInfo(stItem) {
             dashes.push({ n: de.n || "d", v: dv });
         }
     }
-    var cKs = (stItem.c && stItem.c.a === 1) ? stItem.c : null;
-    var wKs = (stItem.w && stItem.w.a === 1) ? stItem.w : null;
+    var cKs = (stItem.c && singleValuePropIsAnimated(stItem.c)) ? stItem.c : null;
+    var wKs = (stItem.w && singleValuePropIsAnimated(stItem.w)) ? stItem.w : null;
     return {
         color: color, width: w, opacity: oVal,
         lineCap: lineCap, lineJoin: lineJoin, miterLimit: miterLimit,
@@ -810,8 +843,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
         if (item.ty === "fl") {
             localFill = extractFillColor(item);
             localFillOpacity = extractFillOpacity(item);
-            localFillColorKs = (item.c && item.c.a === 1) ? item.c : null;
-            localFillOpacityKs = (item.o && item.o.a === 1) ? item.o : null;
+            localFillColorKs = (item.c && singleValuePropIsAnimated(item.c)) ? item.c : null;
+            localFillOpacityKs = (item.o && singleValuePropIsAnimated(item.o)) ? item.o : null;
             foundFill = true;
             localGradient = null;
             if (item.r != null) localFillRule = item.r;
@@ -1147,9 +1180,9 @@ function getAllShapesFromLayer(layer) {
             start: startVal,
             end: endVal,
             offset: offVal,
-            startKs: (trimItem.s && trimItem.s.a === 1) ? trimItem.s : null,
-            endKs: (trimItem.e && trimItem.e.a === 1) ? trimItem.e : null,
-            offsetKs: (trimItem.o && trimItem.o.a === 1) ? trimItem.o : null
+            startKs: (trimItem.s && singleValuePropIsAnimated(trimItem.s)) ? trimItem.s : null,
+            endKs: (trimItem.e && singleValuePropIsAnimated(trimItem.e)) ? trimItem.e : null,
+            offsetKs: (trimItem.o && singleValuePropIsAnimated(trimItem.o)) ? trimItem.o : null
         };
         for (var ri = 0; ri < result.length; ri++) result[ri].trimInfo = trimInfo;
     }
@@ -1397,7 +1430,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
     if (ks.p && ks.p.s === true) {
         var pxProp = ks.p.x;
         var pyProp = ks.p.y;
-        if (pxProp && pxProp.a === 1 && pxProp.k) {
+        if (pxProp && pxProp.k && ((pxProp.a === 1) || (pxProp.k.length > 1 && isLottieKeyframeStyleArray(pxProp.k) && pxProp.a !== 1))) {
             posAnimated = true;
             var pxKfs = [];
             for (var kpi = 0; kpi < pxProp.k.length; kpi++) {
@@ -1413,7 +1446,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
             }
             applyLottieEasing(nodeId, "position.x", pxKfs, pxProp.k, 0);
         }
-        if (pyProp && pyProp.a === 1 && pyProp.k) {
+        if (pyProp && pyProp.k && ((pyProp.a === 1) || (pyProp.k.length > 1 && isLottieKeyframeStyleArray(pyProp.k) && pyProp.a !== 1))) {
             posAnimated = true;
             var pyKfs = [];
             for (var kpi2 = 0; kpi2 < pyProp.k.length; kpi2++) {
@@ -1429,7 +1462,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
             }
             applyLottieEasing(nodeId, "position.y", pyKfs, pyProp.k, 0);
         }
-    } else if (ks.p && ks.p.a === 1 && ks.p.k && ks.p.k.length > 1) {
+    } else if (ks.p && ks.p.k && ks.p.k.length > 1 && (ks.p.a === 1 || (isLottieKeyframeStyleArray(ks.p.k) && ks.p.a !== 1))) {
         posAnimated = true;
         var posXKfs = [];
         var posYKfs = [];
@@ -1450,7 +1483,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
         applyLottieEasing(nodeId, "position.y", posYKfs, ks.p.k, 1);
     }
 
-    if (ks.s && ks.s.a === 1 && ks.s.k && ks.s.k.length > 1) {
+    if (ks.s && ks.s.k && ks.s.k.length > 1 && (ks.s.a === 1 || (isLottieKeyframeStyleArray(ks.s.k) && ks.s.a !== 1))) {
         var scaleXKfs = [];
         var scaleYKfs = [];
 
@@ -1491,7 +1524,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
         }
     }
 
-    if (ks.r && ks.r.a === 1 && ks.r.k && ks.r.k.length > 1) {
+    if (ks.r && ks.r.k && ks.r.k.length > 1 && (ks.r.a === 1 || (isLottieKeyframeStyleArray(ks.r.k) && ks.r.a !== 1))) {
         var rotKfs = [];
         for (var kr = 0; kr < ks.r.k.length; kr++) {
             var krv = ks.r.k[kr];
@@ -1507,7 +1540,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
         applyLottieEasing(nodeId, "rotation.z", rotKfs, ks.r.k, 0);
     }
 
-    if (!skipOpacity && ks.o && ks.o.a === 1 && ks.o.k && ks.o.k.length > 1) {
+    if (!skipOpacity && ks.o && ks.o.k && ks.o.k.length > 1 && (ks.o.a === 1 || (isLottieKeyframeStyleArray(ks.o.k) && ks.o.a !== 1))) {
         var opKfs = [];
         for (var ko = 0; ko < ks.o.k.length; ko++) {
             var kov = ks.o.k[ko];
@@ -1526,7 +1559,7 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
 
 // --- Keyframe a single numeric Lottie property ---
 function keyframeSingleValue(nodeId, attrName, ks, timeOffset) {
-    if (!ks || ks.a !== 1 || !ks.k || ks.k.length <= 1) return;
+    if (!singleValuePropIsAnimated(ks)) return;
     var tOff = timeOffset || 0;
     var kfs = [];
     for (var ki = 0; ki < ks.k.length; ki++) {
@@ -1565,7 +1598,7 @@ function applyTrimPath(nodeId, trimInfo, tOff) {
 
 // Keyframe trim travel converting 0-360 degrees to 0-100 percent
 function keyframeTrimTravel(nodeId, ks, timeOffset) {
-    if (!ks || ks.a !== 1 || !ks.k || ks.k.length <= 1) return;
+    if (!singleValuePropIsAnimated(ks)) return;
     var tOff = timeOffset || 0;
     var kfs = [];
     for (var ki = 0; ki < ks.k.length; ki++) {
@@ -1585,7 +1618,7 @@ function keyframeTrimTravel(nodeId, ks, timeOffset) {
 
 // --- Animate shape path keyframes ---
 function animateShapePath(shapeId, pathKs, yFlip, scaleFactor, groupOffset, timeOffset) {
-    if (!pathKs || pathKs.a !== 1 || !pathKs.k || pathKs.k.length <= 1) return;
+    if (!pathKs || !pathKsIsAnimated(pathKs)) return;
     var tOff = timeOffset || 0;
     var applied = 0;
     for (var kf = 0; kf < pathKs.k.length; kf++) {
@@ -1608,7 +1641,7 @@ function animateShapePath(shapeId, pathKs, yFlip, scaleFactor, groupOffset, time
 // Get path data from an animated ks at a specific Lottie time.
 // Returns the start value of the keyframe at or just before the target time.
 function getPathDataAtTime(ks, time) {
-    if (!ks || ks.a !== 1 || !ks.k || ks.k.length === 0) return null;
+    if (!ks || !ks.k || ks.k.length === 0 || !pathKsIsAnimated(ks)) return null;
     var bestIdx = 0;
     for (var i = 0; i < ks.k.length; i++) {
         var t = ks.k[i].t != null ? ks.k[i].t : 0;
@@ -1625,7 +1658,7 @@ function animateCompoundShapePaths(shapeId, compoundPaths, yFlip, scaleFactor, t
     var anyAnimated = false;
     for (var i = 0; i < compoundPaths.length; i++) {
         var ks = compoundPaths[i].pathKs;
-        if (ks && ks.a === 1 && ks.k && ks.k.length > 1) {
+        if (pathKsIsAnimated(ks)) {
             anyAnimated = true;
             break;
         }
@@ -1637,7 +1670,7 @@ function animateCompoundShapePaths(shapeId, compoundPaths, yFlip, scaleFactor, t
     var timeSet = {};
     for (var i = 0; i < compoundPaths.length; i++) {
         var ks = compoundPaths[i].pathKs;
-        if (!ks || ks.a !== 1 || !ks.k) continue;
+        if (!ks || !ks.k || !pathKsIsAnimated(ks)) continue;
         for (var j = 0; j < ks.k.length; j++) {
             var t = ks.k[j].t != null ? ks.k[j].t : 0;
             if (!timeSet[t]) {
@@ -1657,7 +1690,7 @@ function animateCompoundShapePaths(shapeId, compoundPaths, yFlip, scaleFactor, t
         for (var ci = 0; ci < compoundPaths.length; ci++) {
             var cp = compoundPaths[ci];
             var pathData;
-            if (cp.pathKs && cp.pathKs.a === 1 && cp.pathKs.k && cp.pathKs.k.length > 1) {
+            if (pathKsIsAnimated(cp.pathKs)) {
                 pathData = getPathDataAtTime(cp.pathKs, t);
             } else {
                 pathData = cp.pathData;
@@ -1682,7 +1715,7 @@ function animateCompoundShapePaths(shapeId, compoundPaths, yFlip, scaleFactor, t
         var easeKs = null;
         for (var ei = 0; ei < compoundPaths.length; ei++) {
             var ePath = compoundPaths[ei].pathKs;
-            if (ePath && ePath.a === 1 && ePath.k && ePath.k.length >= 2) {
+            if (pathKsIsAnimated(ePath)) {
                 easeKs = ePath.k;
                 break;
             }
@@ -1710,7 +1743,7 @@ function lottieMaskModeToCavalry(mode, isFirstMask) {
 function applyMaskOpacityFromLottie(maskId, maskO, timeOffset) {
     if (!maskId || !maskO) return;
     var tOff = timeOffset || 0;
-    if (maskO.a !== 1 || !maskO.k || maskO.k.length <= 1) {
+    if (!singleValuePropIsAnimated(maskO)) {
         var v = getStaticValue(maskO, 100);
         if (Array.isArray(v)) v = v[0];
         if (typeof v !== "number") return;
@@ -1753,7 +1786,7 @@ function tryApplyLottieMaskExtras(mask, maskId, tgt, maskSlotIdx, timeOffset) {
     if (mask.x) {
         var xVal = getStaticValue(mask.x, 0);
         var xNum = typeof xVal === "number" ? xVal : 0;
-        var xAnim = mask.x.a === 1 && mask.x.k && mask.x.k.length > 1;
+        var xAnim = mask.x.k && mask.x.k.length > 1 && (mask.x.a === 1 || (isLottieKeyframeStyleArray(mask.x.k) && mask.x.a !== 1));
         if (Math.abs(xNum) > 0.01 || xAnim) {
             if (!_lottieMaskPropsUnsupportedLogged) {
                 _lottieMaskPropsUnsupportedLogged = true;
@@ -1777,7 +1810,7 @@ function createSingleMaskShape(maskData, label, yFlip, scaleFactor, maskOff, par
     } catch (e) { return null; }
     api.set(maskId, { "hidden": true });
     try { api.parent(maskId, parentId); } catch (e) {}
-    if (pt.a === 1 && pt.k && pt.k.length > 1) {
+    if (pathKsIsAnimated(pt)) {
         var maskKfCount = 0;
         for (var kf = 0; kf < pt.k.length; kf++) {
             var kfData = getPathDataAtKeyframe(pt, kf);
