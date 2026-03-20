@@ -678,9 +678,9 @@ function extractGradientStrokeInfo(gsItem) {
 }
 
 // --- Convert Lottie ellipse (ty:el) to path data ---
-function ellipseToPathData(elItem) {
-    var sizeVal = getStaticValue(elItem.s, [100, 100]);
-    var posVal = getStaticValue(elItem.p, [0, 0]);
+function ellipseToPathData(elItem, overrideSize, overridePos) {
+    var sizeVal = overrideSize || getStaticValue(elItem.s, [100, 100]);
+    var posVal = overridePos || getStaticValue(elItem.p, [0, 0]);
     var rx = (Array.isArray(sizeVal) ? sizeVal[0] : sizeVal) / 2;
     var ry = (Array.isArray(sizeVal) ? sizeVal[1] : sizeVal) / 2;
     var cx = Array.isArray(posVal) ? posVal[0] : 0;
@@ -696,10 +696,10 @@ function ellipseToPathData(elItem) {
 }
 
 // --- Convert Lottie rectangle (ty:rc) to path data ---
-function rectToPathData(rcItem) {
-    var sizeVal = getStaticValue(rcItem.s, [100, 100]);
-    var posVal = getStaticValue(rcItem.p, [0, 0]);
-    var rndVal = getStaticValue(rcItem.r, 0);
+function rectToPathData(rcItem, overrideSize, overridePos, overrideR) {
+    var sizeVal = overrideSize || getStaticValue(rcItem.s, [100, 100]);
+    var posVal = overridePos || getStaticValue(rcItem.p, [0, 0]);
+    var rndVal = overrideR != null ? overrideR : getStaticValue(rcItem.r, 0);
     if (Array.isArray(rndVal)) rndVal = rndVal[0];
     var hw = (Array.isArray(sizeVal) ? sizeVal[0] : sizeVal) / 2;
     var hh = (Array.isArray(sizeVal) ? sizeVal[1] : sizeVal) / 2;
@@ -730,6 +730,86 @@ function rectToPathData(rcItem) {
         i: [[0, 0], [0, 0], [0, 0], [0, 0]],
         c: true
     };
+}
+
+// Get the value of an animated Lottie property at a given time (step interpolation).
+function getAnimValueAtTime(prop, time, fallback) {
+    if (!prop || !prop.k) return fallback;
+    var k = prop.k;
+    if (!Array.isArray(k) || k.length === 0) return k !== undefined ? k : fallback;
+    if (typeof k[0] !== "object" || k[0].t === undefined) return k;
+    var best = k[0].s || fallback;
+    for (var i = 0; i < k.length; i++) {
+        var t = k[i].t != null ? k[i].t : 0;
+        if (t <= time) {
+            best = k[i].s != null ? k[i].s : best;
+        } else {
+            break;
+        }
+    }
+    return best;
+}
+
+// Collect unique keyframe times from multiple animated properties.
+function collectKeyframeTimes(props) {
+    var times = [];
+    var seen = {};
+    for (var pi = 0; pi < props.length; pi++) {
+        var p = props[pi];
+        if (!p || !p.k || !Array.isArray(p.k)) continue;
+        for (var ki = 0; ki < p.k.length; ki++) {
+            if (p.k[ki] && typeof p.k[ki] === "object" && p.k[ki].t !== undefined) {
+                var t = p.k[ki].t;
+                if (!seen[t]) { seen[t] = true; times.push(t); }
+            }
+        }
+    }
+    times.sort(function(a, b) { return a - b; });
+    return times;
+}
+
+// Animate an ellipse or rectangle by keyframing inputPath at each keyframe time.
+function animateParametricShape(nodeId, item, isRect, yFlip, scaleFactor, groupOffset, timeOffset) {
+    var props = isRect ? [item.s, item.p, item.r] : [item.s, item.p];
+    var anyAnimated = false;
+    for (var i = 0; i < props.length; i++) {
+        if (singleValuePropIsAnimated(props[i])) { anyAnimated = true; break; }
+    }
+    if (!anyAnimated) return;
+
+    var times = collectKeyframeTimes(props);
+    if (times.length < 2) return;
+
+    var tOff = timeOffset || 0;
+    var applied = 0;
+    for (var ti = 0; ti < times.length; ti++) {
+        var t = times[ti];
+        var sizeAtT = getAnimValueAtTime(item.s, t, isRect ? [100, 100] : [100, 100]);
+        var posAtT = getAnimValueAtTime(item.p, t, [0, 0]);
+        var pathData;
+        if (isRect) {
+            var rAtT = getAnimValueAtTime(item.r, t, 0);
+            if (Array.isArray(rAtT)) rAtT = rAtT[0];
+            pathData = rectToPathData(item, sizeAtT, posAtT, rAtT);
+        } else {
+            pathData = ellipseToPathData(item, sizeAtT, posAtT);
+        }
+        if (!pathData) continue;
+        var contour = lottiePathToContourData(pathData, yFlip, scaleFactor, groupOffset);
+        if (!contour) continue;
+        var frame = t + tOff;
+        try {
+            api.keyframe(nodeId, frame, { "inputPath": contour });
+            applied++;
+        } catch (e) {
+            if (applied === 0) console.log("Lottie Importer: Parametric shape keyframe failed: " + (e && e.message ? e.message : String(e)));
+            break;
+        }
+    }
+    if (applied >= 2) {
+        var dominantKs = singleValuePropIsAnimated(item.s) ? item.s : item.p;
+        applyPathEasing(nodeId, "inputPath", dominantKs.k, tOff);
+    }
 }
 
 // Full comp rectangle in Lottie mask space (origin top-left, Y down) — matches
@@ -836,6 +916,7 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
     var localPolyStars = [];
 
     var localFillRule = null;
+    var localFillBlendMode = 0;
 
     for (var i = 0; i < items.length; i++) {
         var item = items[i];
@@ -848,6 +929,7 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             foundFill = true;
             localGradient = null;
             if (item.r != null) localFillRule = item.r;
+            localFillBlendMode = item.bm || 0;
         }
         if (item.ty === "gf") { localGradient = extractGradientInfo(item); foundFill = true; }
         if (item.ty === "gs") {
@@ -860,10 +942,12 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             localShapes.push({ pathData: getPathDataFromShapeKs(item.ks), pathKs: item.ks });
         }
         if (item.ty === "rc") {
-            localShapes.push({ pathData: rectToPathData(item), pathKs: null });
+            var rcAnimated = singleValuePropIsAnimated(item.s) || singleValuePropIsAnimated(item.p) || singleValuePropIsAnimated(item.r);
+            localShapes.push({ pathData: rectToPathData(item), pathKs: null, rcItem: rcAnimated ? item : null, elItem: null });
         }
         if (item.ty === "el") {
-            localShapes.push({ pathData: ellipseToPathData(item), pathKs: null });
+            var elAnimated = singleValuePropIsAnimated(item.s) || singleValuePropIsAnimated(item.p);
+            localShapes.push({ pathData: ellipseToPathData(item), pathKs: null, rcItem: null, elItem: elAnimated ? item : null });
         }
         if (item.ty === "sr") {
             localPolyStars.push(item);
@@ -887,6 +971,13 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 sx: Array.isArray(rpSc) ? rpSc[0] : 100, sy: Array.isArray(rpSc) ? rpSc[1] : 100,
                 r: rpRot, opacity: rpOp,
                 ax: Array.isArray(rpAx) ? rpAx[0] : 0, ay: Array.isArray(rpAx) ? rpAx[1] : 0
+            };
+            item._rpAnimated = {
+                copiesKs: item.c,
+                rotKs: rpTr.r || null,
+                scaleKs: rpTr.s || null,
+                posKs: rpTr.p || null,
+                opacityKs: rpTr.o || rpTr.so || null
             };
         }
         if (item.ty === "rd") {
@@ -946,7 +1037,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 rdValue: localRdValue,
                 opAmount: localOpAmount,
                 groupScaleX: newSX,
-                groupScaleY: newSY
+                groupScaleY: newSY,
+                fillBlendMode: localFillBlendMode
             });
         } else if (compParts.length === 1) {
             results.push({
@@ -967,7 +1059,10 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 rdValue: localRdValue,
                 opAmount: localOpAmount,
                 groupScaleX: newSX,
-                groupScaleY: newSY
+                groupScaleY: newSY,
+                fillBlendMode: localFillBlendMode,
+                elItem: localShapes[0].elItem || null,
+                rcItem: localShapes[0].rcItem || null
             });
         }
     } else {
@@ -995,7 +1090,10 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                     rdValue: localRdValue,
                     opAmount: localOpAmount,
                     groupScaleX: newSX,
-                    groupScaleY: newSY
+                    groupScaleY: newSY,
+                    fillBlendMode: localFillBlendMode,
+                    elItem: localShapes[si].elItem || null,
+                    rcItem: localShapes[si].rcItem || null
                 });
             }
         }
@@ -1021,47 +1119,62 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             opAmount: localOpAmount,
             polyStar: localPolyStars[psi],
             groupScaleX: newSX,
-            groupScaleY: newSY
+            groupScaleY: newSY,
+            fillBlendMode: localFillBlendMode
         });
     }
 
-    // Repeater: duplicate shapes with baked transforms
+    // Repeater: use Cavalry duplicator when possible, bake as fallback
     var rpItem = null;
     for (var rpi = 0; rpi < items.length; rpi++) {
         if (items[rpi].ty === "rp" && items[rpi]._rpData) { rpItem = items[rpi]; break; }
     }
     if (rpItem && rpItem._rpData) {
         var rp = rpItem._rpData;
-        var origCount = results.length;
-        var origResults = [];
-        for (var ori = origCount - localShapes.length - localPolyStars.length; ori < origCount; ori++) {
-            if (ori >= 0) origResults.push(results[ori]);
-        }
-        for (var ci = 1; ci < rp.copies; ci++) {
-            var rpDx = rp.px * ci;
-            var rpDy = rp.py * ci;
-            var rpRot = rp.r * ci;
-            var rpSx = Math.pow(rp.sx / 100, ci) * 100;
-            var rpSy = Math.pow(rp.sy / 100, ci) * 100;
-            var rpOp = Math.pow(rp.opacity / 100, ci) * 100;
-            for (var oij = 0; oij < origResults.length; oij++) {
-                var origShape = origResults[oij];
-                var cloned = {};
-                for (var pk in origShape) {
-                    if (origShape.hasOwnProperty(pk)) cloned[pk] = origShape[pk];
+        var useDuplicator = (rp.copies > 1 && Math.abs(rp.r) > 0.001
+            && Math.abs(rp.px) < 0.001 && Math.abs(rp.py) < 0.001
+            && Math.abs(rp.sx - 100) < 0.01 && Math.abs(rp.sy - 100) < 0.01);
+
+        if (useDuplicator) {
+            var origCount = results.length;
+            for (var ori2 = origCount - localShapes.length - localPolyStars.length; ori2 < origCount; ori2++) {
+                if (ori2 >= 0) {
+                    results[ori2].repeaterItem = rpItem;
+                    results[ori2].hasRepeater = true;
                 }
-                if (cloned.pathData) {
-                    cloned.pathData = transformPathData(cloned.pathData, rpSx, rpSy, rpRot);
+            }
+        } else {
+            var origCount = results.length;
+            var origResults = [];
+            for (var ori = origCount - localShapes.length - localPolyStars.length; ori < origCount; ori++) {
+                if (ori >= 0) origResults.push(results[ori]);
+            }
+            for (var ci = 1; ci < rp.copies; ci++) {
+                var rpDx = rp.px * ci;
+                var rpDy = rp.py * ci;
+                var rpRot = rp.r * ci;
+                var rpSx = Math.pow(rp.sx / 100, ci) * 100;
+                var rpSy = Math.pow(rp.sy / 100, ci) * 100;
+                var rpOp = Math.pow(rp.opacity / 100, ci) * 100;
+                for (var oij = 0; oij < origResults.length; oij++) {
+                    var origShape = origResults[oij];
+                    var cloned = {};
+                    for (var pk in origShape) {
+                        if (origShape.hasOwnProperty(pk)) cloned[pk] = origShape[pk];
+                    }
+                    if (cloned.pathData) {
+                        cloned.pathData = transformPathData(cloned.pathData, rpSx, rpSy, rpRot);
+                    }
+                    cloned.groupOffset = [
+                        (cloned.groupOffset ? cloned.groupOffset[0] : 0) + rpDx,
+                        (cloned.groupOffset ? cloned.groupOffset[1] : 0) + rpDy
+                    ];
+                    if (cloned.groupOpacity != null) {
+                        cloned.groupOpacity = cloned.groupOpacity * (rpOp / 100);
+                    }
+                    cloned.pathKs = null;
+                    results.push(cloned);
                 }
-                cloned.groupOffset = [
-                    (cloned.groupOffset ? cloned.groupOffset[0] : 0) + rpDx,
-                    (cloned.groupOffset ? cloned.groupOffset[1] : 0) + rpDy
-                ];
-                if (cloned.groupOpacity != null) {
-                    cloned.groupOpacity = cloned.groupOpacity * (rpOp / 100);
-                }
-                cloned.pathKs = null;
-                results.push(cloned);
             }
         }
     }
@@ -1308,6 +1421,48 @@ function buildLayerTransformRig(contentNodeId, layer, entry) {
     return { xform: xformId, pivot: pivotId };
 }
 
+// --- Spatial position path helpers (Lottie to/ti cubic bezier) ---
+var SPATIAL_SAMPLES = 8;
+
+function hasSpatialTangents(lottieKfs) {
+    if (!lottieKfs) return false;
+    for (var i = 0; i < lottieKfs.length - 1; i++) {
+        var kf = lottieKfs[i];
+        if (!kf) continue;
+        if (kf.to && (kf.to[0] !== 0 || kf.to[1] !== 0)) return true;
+        if (kf.ti && (kf.ti[0] !== 0 || kf.ti[1] !== 0)) return true;
+    }
+    return false;
+}
+
+function evalCubic(p0, c0, c1, p1, t) {
+    var mt = 1 - t;
+    return mt * mt * mt * p0 + 3 * mt * mt * t * c0 + 3 * mt * t * t * c1 + t * t * t * p1;
+}
+
+// Map normalized t through Lottie temporal ease to get parametric u.
+// Lottie temporal ease: cubic bezier from (0,0) to (1,1) with control points
+// (ox, oy) and (ix, iy). We approximate by sampling and finding the t that
+// gives the requested u on the x-axis, then return the y value.
+function evalTemporalEase(ox, oy, ix, iy, t) {
+    if (t <= 0) return 0;
+    if (t >= 1) return 1;
+    var best = t;
+    var bestDist = 999;
+    for (var s = 0; s <= 20; s++) {
+        var u = s / 20;
+        var mu = 1 - u;
+        var bx = 3 * mu * mu * u * ox + 3 * mu * u * u * ix + u * u * u;
+        var dist = Math.abs(bx - t);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = u;
+        }
+    }
+    var mu2 = 1 - best;
+    return 3 * mu2 * mu2 * best * oy + 3 * mu2 * best * best * iy + best * best * best;
+}
+
 // --- Apply Lottie bezier easing to Cavalry keyframe tangents ---
 // cavalryKfs: array of {frame, value} pairs matching the created keyframes
 // lottieKfs: the raw Lottie keyframe array (with i/o tangent data)
@@ -1328,7 +1483,14 @@ function applyLottieEasing(nodeId, attr, cavalryKfs, lottieKfs, component) {
     for (var i = 0; i < cavalryKfs.length - 1; i++) {
         var lkf = lottieKfs[i];
         if (!lkf) continue;
-        if (lkf.h === 1) continue;
+        if (lkf.h === 1) {
+            try {
+                var hObj = {};
+                hObj[attr] = { "frame": cavalryKfs[i].frame, "type": 2 };
+                api.modifyKeyframe(nodeId, hObj);
+            } catch (e) {}
+            continue;
+        }
         if (!lkf.o) continue;
         var curFrame = cavalryKfs[i].frame;
         var curValue = cavalryKfs[i].value;
@@ -1466,21 +1628,98 @@ function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, 
         posAnimated = true;
         var posXKfs = [];
         var posYKfs = [];
-        for (var kp = 0; kp < ks.p.k.length; kp++) {
-            var kpv = ks.p.k[kp];
-            var frame = (kpv.t != null ? kpv.t : 0) + tOff;
-            var v = kpv.s || kpv.k;
-            if (!Array.isArray(v)) continue;
-            var px = sc * (v[0] - ax * sSx - centX);
-            var py = sc * (yFlip ? -(v[1] - ay * sSy - centY) : (v[1] - ay * sSy - centY));
-            try {
-                api.keyframe(nodeId, frame, { "position.x": px, "position.y": py });
-                posXKfs.push({ frame: frame, value: px });
-                posYKfs.push({ frame: frame, value: py });
-            } catch (e) {}
+        var spatialMode = hasSpatialTangents(ks.p.k);
+
+        if (spatialMode) {
+            for (var kp = 0; kp < ks.p.k.length; kp++) {
+                var kpv = ks.p.k[kp];
+                var frame0 = (kpv.t != null ? kpv.t : 0) + tOff;
+                var v0 = kpv.s || kpv.k;
+                if (!Array.isArray(v0)) continue;
+                var px0 = sc * (v0[0] - ax * sSx - centX);
+                var py0 = sc * (yFlip ? -(v0[1] - ay * sSy - centY) : (v0[1] - ay * sSy - centY));
+                try {
+                    api.keyframe(nodeId, frame0, { "position.x": px0, "position.y": py0 });
+                    posXKfs.push({ frame: frame0, value: px0 });
+                    posYKfs.push({ frame: frame0, value: py0 });
+                } catch (e) {}
+
+                if (kp >= ks.p.k.length - 1) continue;
+                var kpNext = ks.p.k[kp + 1];
+                var v1 = kpNext.s || kpNext.k;
+                if (!Array.isArray(v1)) continue;
+                var toTan = kpv.to || [0, 0, 0];
+                var tiTan = kpv.ti || [0, 0, 0];
+                if (toTan[0] === 0 && toTan[1] === 0 && tiTan[0] === 0 && tiTan[1] === 0) continue;
+
+                var frame1 = (kpNext.t != null ? kpNext.t : 0) + tOff;
+                var frameDiff = frame1 - frame0;
+                if (frameDiff <= 1) continue;
+
+                var c0x = v0[0] + toTan[0], c0y = v0[1] + toTan[1];
+                var c1x = v1[0] + tiTan[0], c1y = v1[1] + tiTan[1];
+
+                var ox = 0, oy = 0, ix = 1, iy = 1;
+                if (kpv.o) {
+                    ox = Array.isArray(kpv.o.x) ? kpv.o.x[0] : (kpv.o.x || 0);
+                    oy = Array.isArray(kpv.o.y) ? kpv.o.y[0] : (kpv.o.y || 0);
+                }
+                if (kpv.i) {
+                    ix = Array.isArray(kpv.i.x) ? kpv.i.x[0] : (kpv.i.x || 1);
+                    iy = Array.isArray(kpv.i.y) ? kpv.i.y[0] : (kpv.i.y || 1);
+                }
+
+                for (var si = 1; si < SPATIAL_SAMPLES; si++) {
+                    var tNorm = si / SPATIAL_SAMPLES;
+                    var tEased = evalTemporalEase(ox, oy, ix, iy, tNorm);
+                    var sampX = evalCubic(v0[0], c0x, c1x, v1[0], tEased);
+                    var sampY = evalCubic(v0[1], c0y, c1y, v1[1], tEased);
+                    var sampPx = sc * (sampX - ax * sSx - centX);
+                    var sampPy = sc * (yFlip ? -(sampY - ay * sSy - centY) : (sampY - ay * sSy - centY));
+                    var sampFrame = Math.round(frame0 + tNorm * frameDiff);
+                    if (sampFrame <= frame0 || sampFrame >= frame1) continue;
+                    try {
+                        api.keyframe(nodeId, sampFrame, { "position.x": sampPx, "position.y": sampPy });
+                        posXKfs.push({ frame: sampFrame, value: sampPx });
+                        posYKfs.push({ frame: sampFrame, value: sampPy });
+                    } catch (e) {}
+                }
+            }
+            posXKfs.sort(function(a, b) { return a.frame - b.frame; });
+            posYKfs.sort(function(a, b) { return a.frame - b.frame; });
+            // Set intermediate (sampled) keyframes to linear; original keyframes keep easing
+            for (var li = 0; li < posXKfs.length; li++) {
+                var isOriginal = false;
+                for (var oi = 0; oi < ks.p.k.length; oi++) {
+                    var origFrame = (ks.p.k[oi].t != null ? ks.p.k[oi].t : 0) + tOff;
+                    if (posXKfs[li].frame === origFrame) { isOriginal = true; break; }
+                }
+                if (!isOriginal) {
+                    try {
+                        api.modifyKeyframe(nodeId, { "position.x": { "frame": posXKfs[li].frame, "type": 1 } });
+                        api.modifyKeyframe(nodeId, { "position.y": { "frame": posYKfs[li].frame, "type": 1 } });
+                    } catch (e) {}
+                }
+            }
+            applyLottieEasing(nodeId, "position.x", posXKfs, ks.p.k, 0);
+            applyLottieEasing(nodeId, "position.y", posYKfs, ks.p.k, 1);
+        } else {
+            for (var kp = 0; kp < ks.p.k.length; kp++) {
+                var kpv = ks.p.k[kp];
+                var frame = (kpv.t != null ? kpv.t : 0) + tOff;
+                var v = kpv.s || kpv.k;
+                if (!Array.isArray(v)) continue;
+                var px = sc * (v[0] - ax * sSx - centX);
+                var py = sc * (yFlip ? -(v[1] - ay * sSy - centY) : (v[1] - ay * sSy - centY));
+                try {
+                    api.keyframe(nodeId, frame, { "position.x": px, "position.y": py });
+                    posXKfs.push({ frame: frame, value: px });
+                    posYKfs.push({ frame: frame, value: py });
+                } catch (e) {}
+            }
+            applyLottieEasing(nodeId, "position.x", posXKfs, ks.p.k, 0);
+            applyLottieEasing(nodeId, "position.y", posYKfs, ks.p.k, 1);
         }
-        applyLottieEasing(nodeId, "position.x", posXKfs, ks.p.k, 0);
-        applyLottieEasing(nodeId, "position.y", posYKfs, ks.p.k, 1);
     }
 
     if (ks.s && ks.s.k && ks.s.k.length > 1 && (ks.s.a === 1 || (isLottieKeyframeStyleArray(ks.s.k) && ks.s.a !== 1))) {
@@ -2057,6 +2296,84 @@ function applyStrokeProperties(nodeId, strokeInfo, scaleFactor) {
     }
 }
 
+// --- Create a Cavalry Duplicator for a Lottie repeater ---
+function createRepeaterDuplicator(sourceShapeId, rpItem, name, tOff) {
+    var rp = rpItem._rpData;
+    var rpAnim = rpItem._rpAnimated || {};
+    if (!rp || rp.copies < 2) return null;
+
+    var groupId = createGroup(name + " Repeater Grp");
+    try { api.parent(sourceShapeId, groupId); } catch (e) {}
+
+    var dupId;
+    try {
+        dupId = api.create("duplicator", name + " Repeater");
+    } catch (e) {
+        return null;
+    }
+    try { api.connect(groupId, "id", dupId, "shapes"); } catch (e) {}
+
+    var totalAngle = rp.r * rp.copies;
+    try {
+        api.setGenerator(dupId, "generator", "circleDistribution");
+        api.set(dupId, {
+            "generator.count": rp.copies,
+            "generator.radius": 0,
+            "generator.angle": Math.abs(totalAngle),
+            "generator.calculateRotations": true
+        });
+        if (totalAngle < 0) {
+            try { api.set(dupId, { "generator.flip": true }); } catch (e) {}
+        }
+    } catch (e) {
+        console.log("Lottie Importer: Duplicator setup failed: " + (e && e.message ? e.message : String(e)));
+    }
+
+    // Keyframe animated copies
+    if (rpAnim.copiesKs && singleValuePropIsAnimated(rpAnim.copiesKs)) {
+        var copiesKfTimes = [];
+        for (var ki = 0; ki < rpAnim.copiesKs.k.length; ki++) {
+            var kv = rpAnim.copiesKs.k[ki];
+            if (kv && typeof kv === "object" && kv.t !== undefined) {
+                var frame = (kv.t != null ? kv.t : 0) + (tOff || 0);
+                var val = kv.s !== undefined ? kv.s : kv.k;
+                if (Array.isArray(val)) val = val[0];
+                if (val != null) {
+                    try {
+                        api.keyframe(dupId, frame, { "generator.count": Math.round(val) });
+                        copiesKfTimes.push(frame);
+                    } catch (e) {}
+                }
+            }
+        }
+    }
+
+    // Keyframe animated rotation (total angle = rotation per copy * copies)
+    if (rpAnim.rotKs && singleValuePropIsAnimated(rpAnim.rotKs)) {
+        for (var ki2 = 0; ki2 < rpAnim.rotKs.k.length; ki2++) {
+            var kv2 = rpAnim.rotKs.k[ki2];
+            if (kv2 && typeof kv2 === "object" && kv2.t !== undefined) {
+                var frame2 = (kv2.t != null ? kv2.t : 0) + (tOff || 0);
+                var rVal = kv2.s !== undefined ? kv2.s : kv2.k;
+                if (Array.isArray(rVal)) rVal = rVal[0];
+                if (rVal != null) {
+                    var copiesAtTime = rp.copies;
+                    if (rpAnim.copiesKs) {
+                        var cv = getAnimValueAtTime(rpAnim.copiesKs, kv2.t != null ? kv2.t : 0, rp.copies);
+                        if (Array.isArray(cv)) cv = cv[0];
+                        copiesAtTime = Math.round(cv);
+                    }
+                    try {
+                        api.keyframe(dupId, frame2, { "generator.angle": Math.abs(rVal * copiesAtTime) });
+                    } catch (e) {}
+                }
+            }
+        }
+    }
+
+    return { dupId: dupId, groupId: groupId };
+}
+
 // --- Create a PolyStar shape (star or polygon primitive) ---
 function createPolyStar(psItem, name, yFlip, scaleFactor, groupOffset, compW, compH) {
     var sy = psItem.sy || 1;
@@ -2139,6 +2456,10 @@ function applyShapeStyle(nodeId, shapeData, scaleFactor, tOff, yFlip) {
     if (effectiveOpacity < 100) {
         try { api.set(nodeId, { "opacity": effectiveOpacity }); } catch (e) {}
     }
+    // Shape-level fill blend mode
+    if (shapeData.fillBlendMode) {
+        applyBlendModeToNode(nodeId, shapeData.fillBlendMode);
+    }
     // Fill opacity
     if (shapeData.hasFill && shapeData.fillOpacity != null && shapeData.fillOpacity < 100) {
         try { api.set(nodeId, { "material.alpha": shapeData.fillOpacity }); } catch (e) {}
@@ -2204,6 +2525,12 @@ function createImageLayer(layer, assets, name, yFlip, scaleFactor, compW, compH)
             else if (mime.indexOf("png") !== -1) ext = "png";
             else if (mime.indexOf("webp") !== -1) ext = "webp";
         }
+    }
+    if (b64Data) {
+        if (b64Data.indexOf("iVBOR") === 0) ext = "png";
+        else if (b64Data.indexOf("/9j/") === 0) ext = "jpg";
+        else if (b64Data.indexOf("UklGR") === 0) ext = "webp";
+        else if (b64Data.indexOf("R0lGOD") === 0) ext = "gif";
     }
     if (b64Data) {
         try {
@@ -2639,11 +2966,25 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                         continue;
                     }
                     animateShapePath(sId, s0.pathKs, yFlip, scaleFactor, s0.groupOffset, tOff);
+                    if (s0.elItem) animateParametricShape(sId, s0.elItem, false, yFlip, scaleFactor, s0.groupOffset, tOff);
+                    if (s0.rcItem) animateParametricShape(sId, s0.rcItem, true, yFlip, scaleFactor, s0.groupOffset, tOff);
                 }
                 applyShapeStyle(sId, s0, scaleFactor, tOff, yFlip);
-                try { nodeId = createGroup(name); } catch (e) { nodeId = sId; }
-                if (nodeId !== sId) { try { api.parent(sId, nodeId); } catch (e) {} }
-                targetIds = [sId];
+                if (s0.hasRepeater && s0.repeaterItem) {
+                    var dupResult = createRepeaterDuplicator(sId, s0.repeaterItem, name, tOff);
+                    if (dupResult) {
+                        nodeId = dupResult.dupId;
+                        targetIds = [dupResult.dupId];
+                    } else {
+                        try { nodeId = createGroup(name); } catch (e) { nodeId = sId; }
+                        if (nodeId !== sId) { try { api.parent(sId, nodeId); } catch (e) {} }
+                        targetIds = [sId];
+                    }
+                } else {
+                    try { nodeId = createGroup(name); } catch (e) { nodeId = sId; }
+                    if (nodeId !== sId) { try { api.parent(sId, nodeId); } catch (e) {} }
+                    targetIds = [sId];
+                }
             } else {
                 try {
                     nodeId = createGroup(name);
@@ -2679,9 +3020,26 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                         } catch (e) { continue; }
                         applyShapeStyle(subId, s, scaleFactor, tOff, yFlip);
                         animateShapePath(subId, s.pathKs, yFlip, scaleFactor, s.groupOffset, tOff);
+                        if (s.elItem) animateParametricShape(subId, s.elItem, false, yFlip, scaleFactor, s.groupOffset, tOff);
+                        if (s.rcItem) animateParametricShape(subId, s.rcItem, true, yFlip, scaleFactor, s.groupOffset, tOff);
                     }
                     try { api.parent(subId, nodeId); } catch (e) {}
                     targetIds.push(subId);
+                }
+                // If any shape in multi-shape group has a repeater, wrap in duplicator
+                var multiRpItem = null;
+                for (var mri = 0; mri < shapeList.length; mri++) {
+                    if (shapeList[mri].hasRepeater && shapeList[mri].repeaterItem) {
+                        multiRpItem = shapeList[mri].repeaterItem;
+                        break;
+                    }
+                }
+                if (multiRpItem) {
+                    var mDup = createRepeaterDuplicator(nodeId, multiRpItem, name, tOff);
+                    if (mDup) {
+                        nodeId = mDup.dupId;
+                        targetIds = [mDup.dupId];
+                    }
                 }
             }
             applyMasks(layer, targetIds, yFlip, scaleFactor, nodeId, tOff, maskIndexByTarget, null, { w: compW, h: compH });
