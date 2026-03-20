@@ -2501,6 +2501,30 @@ function createSolidLayer(layer, name, yFlip, scaleFactor, compW, compH, hasPare
 }
 
 // --- Create an Image Layer (ty=2) ---
+var _lottieDirCreated = {};
+function _ensureLottieDir(dirPath) {
+    if (_lottieDirCreated[dirPath]) return;
+    var ok = false;
+    try { if (api.isDirectory && api.isDirectory(dirPath)) { ok = true; } } catch (e) {}
+    if (!ok) {
+        try { if (api.makeFolder) { api.makeFolder(dirPath); ok = true; } } catch (e) {}
+    }
+    if (!ok) {
+        try { if (api.ensureDirectory) { api.ensureDirectory(dirPath); ok = true; } } catch (e) {}
+    }
+    if (!ok) {
+        try { if (api.createDirectory) { api.createDirectory(dirPath); ok = true; } } catch (e) {}
+    }
+    if (!ok) {
+        try {
+            if (api.runProcess) {
+                api.runProcess("mkdir", ["-p", dirPath]);
+                ok = true;
+            }
+        } catch (e) {}
+    }
+    if (ok) _lottieDirCreated[dirPath] = true;
+}
 var lottieAssetGroupId = null;
 function createImageLayer(layer, assets, name, yFlip, scaleFactor, compW, compH) {
     var refId = layer.refId || layer.ref;
@@ -2534,32 +2558,50 @@ function createImageLayer(layer, assets, name, yFlip, scaleFactor, compW, compH)
     }
     if (b64Data) {
         try {
+            var fileName = (asset.id || "img") + "." + ext;
+            var filePath = null;
             var assetsPath = api.getAssetPath ? api.getAssetPath() : null;
             if (assetsPath) {
                 var lottieFolderPath = assetsPath + "/Lottie";
-                try { if (api.ensureDirectory) api.ensureDirectory(lottieFolderPath); } catch (e) {}
-                var filePath = lottieFolderPath + "/" + (asset.id || "img") + "." + ext;
-                if (api.writeEncodedToBinaryFile) {
-                    api.writeEncodedToBinaryFile(filePath, b64Data);
+                _ensureLottieDir(lottieFolderPath);
+                filePath = lottieFolderPath + "/" + fileName;
+            }
+            if (!filePath && api.getTempFolder) {
+                var tmpFolder = api.getTempFolder() + "/Lottie";
+                _ensureLottieDir(tmpFolder);
+                filePath = tmpFolder + "/" + fileName;
+            }
+            if (filePath) {
+                var wrote = false;
+                try { if (api.writeEncodedToBinaryFile) { wrote = !!api.writeEncodedToBinaryFile(filePath, b64Data); } } catch (eEnc) { wrote = false; }
+                if (!wrote) {
+                    try { if (api.writeFile) { api.writeFile(filePath, b64Data, { encoding: "base64" }); wrote = true; } } catch (eWF) { wrote = false; }
+                }
+                if (wrote) {
                     var fileAssetId = null;
-                    try { fileAssetId = api.loadAsset(filePath, false); } catch (e) {}
-                    if (!fileAssetId) { try { fileAssetId = api.importAsset(filePath); } catch (e) {} }
+                    try { if (api.loadAsset) fileAssetId = api.loadAsset(filePath, false); } catch (eLoad) { fileAssetId = null; }
+                    if (!fileAssetId) { try { if (api.importAsset) fileAssetId = api.importAsset(filePath); } catch (eImp) { fileAssetId = null; } }
                     if (fileAssetId) {
                         var shaderId = api.create("imageShader", name + " Shader");
-                        try { api.connect(fileAssetId, "id", shaderId, "asset"); } catch (e) {}
-                        api.addArrayIndex(nodeId, "material.colorShaders");
-                        api.connect(shaderId, "id", nodeId, "material.colorShaders.0.shader");
+                        try { api.connect(fileAssetId, "id", shaderId, "image"); } catch (eCon) {}
+                        api.connect(shaderId, "id", nodeId, "material.colorShaders");
+                        api.parent(shaderId, nodeId);
+                        api.set(nodeId, { "material.materialColor.a": 0 });
                         if (!lottieAssetGroupId) {
-                            try { lottieAssetGroupId = api.createAssetGroup("Lottie Assets"); } catch (e) {}
+                            try { lottieAssetGroupId = api.createAssetGroup("Lottie Assets"); } catch (eGrp) {}
                         }
-                        if (lottieAssetGroupId && fileAssetId) {
-                            try { api.parent(fileAssetId, lottieAssetGroupId); } catch (e) {}
+                        if (lottieAssetGroupId) {
+                            try { api.parent(fileAssetId, lottieAssetGroupId); } catch (ePar) {}
                         }
+                    } else {
+                        console.log("Lottie Importer: Could not load image asset: " + filePath);
                     }
+                } else {
+                    console.log("Lottie Importer: Could not write image file: " + filePath);
                 }
             }
         } catch (e) {
-            console.log("Lottie Importer: Image decode failed: " + e.message);
+            console.log("Lottie Importer: Image decode failed: " + (e && e.message ? e.message : String(e)));
         }
     }
     return nodeId;
@@ -2617,24 +2659,18 @@ function createTextLayer(layer, name, yFlip, scaleFactor, compW, compH) {
 }
 
 // True precomp composition size for transform math (anchor bake, comp center).
-// 1) Prefer asset.w/h when present.
-// 2) If missing: some exports omit asset size but set layer.w/h to the *source*
-//    comp (e.g. 3840) while root is tiny (140) — use layer dims when either
-//    side is larger than the parent comp (CanvaLogo_Gradient).
-// 3) If layer.w/h are both smaller than parent (timeline proxy box 400x500 in
-//    a 1200 comp), inner ks usually lives in parent space — inherit parent
-//    (website-building-of-shopping-sale).
+// Lottie spec: layer.w/h on a ty:0 layer are the source composition dimensions.
 function resolvePrecompSourceDims(layer, asset, parentCompW, parentCompH) {
-    var pw = (parentCompW != null && parentCompW > 0) ? parentCompW : 1920;
-    var ph = (parentCompH != null && parentCompH > 0) ? parentCompH : 1080;
     if (asset && asset.w > 0 && asset.h > 0) {
         return { w: asset.w, h: asset.h };
     }
     var lw = layer.w;
     var lh = layer.h;
-    if (lw > 0 && lh > 0 && (lw > pw || lh > ph)) {
+    if (lw > 0 && lh > 0) {
         return { w: lw, h: lh };
     }
+    var pw = (parentCompW != null && parentCompW > 0) ? parentCompW : 1920;
+    var ph = (parentCompH != null && parentCompH > 0) ? parentCompH : 1080;
     return { w: pw, h: ph };
 }
 
