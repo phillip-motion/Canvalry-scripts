@@ -1403,7 +1403,9 @@ function buildLayerTransformRig(contentNodeId, layer, entry) {
     if (entry && entry.kind === "precomp") {
         return { xform: contentNodeId, pivot: contentNodeId };
     }
-    var pa = getPivotAnchorForLayer(layer.ks, 0, 0);
+    var rigPW = (entry && entry.kind === "image" && entry.imageW > 0) ? entry.imageW : 0;
+    var rigPH = (entry && entry.kind === "image" && entry.imageH > 0) ? entry.imageH : 0;
+    var pa = getPivotAnchorForLayer(layer.ks, rigPW, rigPH);
     if (!layer.ks || (Math.abs(pa.ax) < 0.0001 && Math.abs(pa.ay) < 0.0001)) {
         return { xform: contentNodeId, pivot: contentNodeId };
     }
@@ -2718,7 +2720,11 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         } else if (l.ty === 1) {
             processLayers.push({ index: i, layer: l, kind: "solid" });
         } else if (l.ty === 2) {
-            processLayers.push({ index: i, layer: l, kind: "image" });
+            var imgRef = l.refId || l.ref;
+            var imgAsset = findAssetById(assets, imgRef);
+            var imgLayerW = (imgAsset && imgAsset.w) ? imgAsset.w : (l.sw || 0);
+            var imgLayerH = (imgAsset && imgAsset.h) ? imgAsset.h : (l.sh || 0);
+            processLayers.push({ index: i, layer: l, kind: "image", imageW: imgLayerW, imageH: imgLayerH });
         } else if (l.ty === 4) {
             var shapes = getAllShapesFromLayer(l);
             if (shapes.length > 0) {
@@ -3360,10 +3366,25 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             transform.position[1] -= scaleFactor * (entry.precompH / 2 * lsy);
             precompDims = { w: entry.precompW, h: entry.precompH };
         }
+        // Image layers: Cavalry rectangle is centered like compositionReferences.
+        // Lottie anchor is from image top-left; adjust by half image size.
+        if (entry.kind === "image" && entry.imageW > 0 && entry.imageH > 0) {
+            if (!usePivotRig) {
+                var imgLsx = transform.scale[0] / 100;
+                var imgLsy = transform.scale[1] / 100;
+                transform.position[0] += scaleFactor * (entry.imageW / 2 * imgLsx);
+                transform.position[1] -= scaleFactor * (entry.imageH / 2 * imgLsy);
+            }
+            precompDims = { w: entry.imageW, h: entry.imageH };
+        }
 
         if (usePivotRig && tPivot && tLayer.ks) {
             var preW = (entry.kind === "precomp" && entry.precompW) ? entry.precompW : 0;
             var preH = (entry.kind === "precomp" && entry.precompH) ? entry.precompH : 0;
+            if (entry.kind === "image" && entry.imageW > 0 && entry.imageH > 0) {
+                preW = entry.imageW;
+                preH = entry.imageH;
+            }
             var paSet = getPivotAnchorForLayer(tLayer.ks, preW, preH);
             try {
                 api.set(tPivot, {
