@@ -10,7 +10,6 @@ ui.setTitle("Consolidate Assets");
 
 var categorizeCheckbox = new ui.Checkbox(true);
 var sceneSubfolderCheckbox = new ui.Checkbox(false);
-var moveInternalCheckbox = new ui.Checkbox(false);
 var excludeRefsCheckbox = new ui.Checkbox(true);
 
 var scanButton = new ui.Button("Refresh");
@@ -164,9 +163,6 @@ function scanExternalAssets() {
     var categorize = categorizeCheckbox.getValue();
     var useSceneFolder = sceneSubfolderCheckbox.getValue();
     var sceneFolder = useSceneFolder ? deriveSceneFolder() : "";
-    var moveInternal = moveInternalCheckbox.getValue() && useSceneFolder && sceneFolder !== "";
-    var sceneFolderPath = sceneFolder !== "" ? assetsPath + "/" + sceneFolder : "";
-
     for (var i = 0; i < allAssets.length; i++) {
         var id = allAssets[i];
         if (!api.isFileAsset(id)) continue;
@@ -183,13 +179,7 @@ function scanExternalAssets() {
 
         if (!api.filePathExists(filePath)) continue;
 
-        var normPath = normalise(filePath);
-        var isInternal = startsWith(normPath, assetsPath);
-
-        if (isInternal) {
-            if (!moveInternal) continue;
-            if (sceneFolderPath !== "" && startsWith(normPath, sceneFolderPath)) continue;
-        }
+        if (startsWith(normalise(filePath), assetsPath)) continue;
 
         var sub = categorize ? subfolder(assetType, id, filePath) : "";
         var targetDir = assetsPath;
@@ -204,8 +194,7 @@ function scanExternalAssets() {
             srcPath: filePath,
             targetDir: targetDir,
             targetPath: targetPath,
-            sub: sub,
-            isInternal: isInternal
+            sub: sub
         });
     }
 
@@ -273,22 +262,6 @@ function doConsolidate() {
         return;
     }
 
-    var hasInternal = false;
-    for (var c = 0; c < lastScanResult.length; c++) {
-        if (rowCheckboxes[c].getValue() && lastScanResult[c].isInternal) {
-            hasInternal = true;
-            break;
-        }
-    }
-    if (hasInternal) {
-        var modal = new ui.Modal();
-        var proceed = modal.showQuestion(
-            "Move files",
-            "This will delete selected files from their original location and move them into the scene subfolder. Make sure no one else is using these files.\n\nContinue?"
-        );
-        if (!proceed) return;
-    }
-
     console.log("Auto-saving scene before consolidation...");
     api.saveScene();
 
@@ -338,15 +311,6 @@ function doConsolidate() {
         } catch (e) {
             console.log("Relink error for " + r.name + ": " + e);
             failed++;
-            continue;
-        }
-
-        if (r.isInternal) {
-            try {
-                api.deleteFilePath(r.srcPath);
-            } catch (e) {
-                console.log("Could not remove original: " + r.srcPath + ": " + e);
-            }
         }
     }
 
@@ -391,15 +355,6 @@ var sceneSubfolderRow = new ui.HLayout();
 sceneSubfolderRow.add(sceneSubfolderCheckbox);
 sceneSubfolderRow.add(sceneSubfolderLabel);
 mainLayout.add(sceneSubfolderRow);
-
-var moveInternalLabel = new ui.Label("Move existing assets into scene subfolder");
-moveInternalLabel.setTextColor(ui.getThemeColor("Light"));
-var moveInternalRow = new ui.HLayout();
-moveInternalRow.add(moveInternalCheckbox);
-moveInternalRow.add(moveInternalLabel);
-mainLayout.add(moveInternalRow);
-moveInternalCheckbox.setHidden(true);
-moveInternalLabel.setHidden(true);
 
 var excludeRefsLabel = new ui.Label("Exclude reference comps (.cv/.cvc)");
 excludeRefsLabel.setTextColor(ui.getThemeColor("Light"));
@@ -458,14 +413,6 @@ categorizeCheckbox.onValueChanged = function () {
 };
 
 sceneSubfolderCheckbox.onValueChanged = function () {
-    var on = sceneSubfolderCheckbox.getValue();
-    moveInternalCheckbox.setHidden(!on);
-    moveInternalLabel.setHidden(!on);
-    if (!on) moveInternalCheckbox.setValue(false);
-    if (lastScanResult.length > 0) runScan();
-};
-
-moveInternalCheckbox.onValueChanged = function () {
     if (lastScanResult.length > 0) runScan();
 };
 
