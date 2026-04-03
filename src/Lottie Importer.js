@@ -2245,6 +2245,28 @@ function applyMasks(layer, targetIds, yFlip, scaleFactor, nodeId, timeOffset, ma
     }
 }
 
+// --- Detect if a Lottie layer's matte shape is stroke+trim based ---
+// Matte sources with a stroke and trim paths need Cavalry track mattes
+// (rendered alpha) rather than clipping masks (path outline), because the
+// animated stroke width/trim determines the visible matte region.
+function layerHasStrokeTrim(layer) {
+    if (!layer || !layer.shapes) return false;
+    var hasTrim = false;
+    var hasStroke = false;
+    for (var i = 0; i < layer.shapes.length; i++) {
+        var s = layer.shapes[i];
+        if (s.ty === "tm") hasTrim = true;
+        if (s.ty === "st" || s.ty === "gs") hasStroke = true;
+        if (s.ty === "gr" && s.it) {
+            for (var j = 0; j < s.it.length; j++) {
+                if (s.it[j].ty === "st" || s.it[j].ty === "gs") hasStroke = true;
+                if (s.it[j].ty === "tm") hasTrim = true;
+            }
+        }
+    }
+    return hasTrim && hasStroke;
+}
+
 // --- Keyframe an animated Lottie color property (RGB array keyframes) ---
 function keyframeColorProperty(nodeId, attrName, ks, timeOffset) {
     if (!ks || ks.a !== 1 || !ks.k || ks.k.length <= 1) return;
@@ -3266,19 +3288,39 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         }
         try { api.set(matteHideId, { "hidden": true }); }
         catch (e) { console.log("Lottie Importer: Could not hide matte " + matteHideId + ": " + e.message); }
-        for (var mt = 0; mt < mattedTargets.length; mt++) {
-            var tgt = mattedTargets[mt];
-            var idx = maskIndexByTarget[tgt] || 0;
-            try {
-                api.addArrayIndex(tgt, "masks");
-                api.connect(matteConnectId, "id", tgt, "masks." + idx + ".id");
-                var tmModeObj = {};
-                tmModeObj["masks." + idx + ".mode"] = 2; // Intersect for track mattes
-                api.set(tgt, tmModeObj);
-                maskIndexByTarget[tgt] = idx + 1;
-                console.log("Lottie Importer: Connected track matte " + matteConnectId + " -> " + tgt + " at masks." + idx);
-            } catch (e) {
-                console.log("Lottie Importer: Track matte connect failed for " + tgt + " at index " + idx + ": " + e.message);
+
+        var matteSourceLayer = layerByInd[matteInd];
+        var useTrackMatte = matteSourceLayer && layerHasStrokeTrim(matteSourceLayer);
+
+        if (useTrackMatte) {
+            // Stroke+trim matte: remove fill so only the stroke's rendered
+            // alpha determines the matte, then connect as a Cavalry track matte.
+            try { api.setFill(matteConnectId, false); } catch (e) {}
+            for (var mt = 0; mt < mattedTargets.length; mt++) {
+                var tgt = mattedTargets[mt];
+                try {
+                    api.addArrayIndex(tgt, "trackMattes");
+                    api.connect(matteConnectId, "id", tgt, "trackMattes.0.id");
+                    console.log("Lottie Importer: Connected track matte (stroke+trim) " + matteConnectId + " -> " + tgt + " at trackMattes.0");
+                } catch (e) {
+                    console.log("Lottie Importer: Track matte connect failed for " + tgt + ": " + e.message);
+                }
+            }
+        } else {
+            for (var mt = 0; mt < mattedTargets.length; mt++) {
+                var tgt = mattedTargets[mt];
+                var idx = maskIndexByTarget[tgt] || 0;
+                try {
+                    api.addArrayIndex(tgt, "masks");
+                    api.connect(matteConnectId, "id", tgt, "masks." + idx + ".id");
+                    var tmModeObj = {};
+                    tmModeObj["masks." + idx + ".mode"] = 2; // Intersect
+                    api.set(tgt, tmModeObj);
+                    maskIndexByTarget[tgt] = idx + 1;
+                    console.log("Lottie Importer: Connected track matte " + matteConnectId + " -> " + tgt + " at masks." + idx);
+                } catch (e) {
+                    console.log("Lottie Importer: Track matte connect failed for " + tgt + " at index " + idx + ": " + e.message);
+                }
             }
         }
     }
