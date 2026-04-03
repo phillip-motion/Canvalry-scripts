@@ -9,9 +9,13 @@ ui.setTitle("Consolidate Assets");
 // =============================================================================
 
 var categorizeCheckbox = new ui.Checkbox(true);
+var excludeRefsCheckbox = new ui.Checkbox(true);
 
 var scanButton = new ui.Button("Scan for External Assets");
 var consolidateButton = new ui.Button("Consolidate");
+
+var selectAllButton = new ui.Button("All");
+var selectNoneButton = new ui.Button("None");
 
 var statusLabel = new ui.Label("");
 statusLabel.setTextColor(ui.getThemeColor("Accent1"));
@@ -19,6 +23,7 @@ statusLabel.setTextColor(ui.getThemeColor("Accent1"));
 var previewScrollView = new ui.ScrollView();
 previewScrollView.setFixedHeight(260);
 
+var checkColumn;
 var pathsColumn;
 var typesColumn;
 var destColumn;
@@ -26,13 +31,14 @@ var tableContainer;
 
 // Tracks the last scan result so Consolidate can act on it
 var lastScanResult = [];
+// Parallel array of checkboxes — one per scan result row
+var rowCheckboxes = [];
 
 // =============================================================================
 // HELPERS
 // =============================================================================
 
 function normalise(p) {
-    // Strip trailing slash for consistent comparison
     if (p.charAt(p.length - 1) === "/") {
         return p.substring(0, p.length - 1);
     }
@@ -41,6 +47,11 @@ function normalise(p) {
 
 function startsWith(str, prefix) {
     return str.substring(0, prefix.length) === prefix;
+}
+
+function endsWith(str, suffix) {
+    if (suffix.length > str.length) return false;
+    return str.substring(str.length - suffix.length) === suffix;
 }
 
 function fileNameFromPath(p) {
@@ -61,6 +72,11 @@ function extensionFromPath(p) {
     var dot = name.lastIndexOf(".");
     if (dot <= 0) return "";
     return name.substring(dot);
+}
+
+function isReferenceFile(filePath) {
+    var lower = filePath.toLowerCase();
+    return endsWith(lower, ".cv") || endsWith(lower, ".cvc");
 }
 
 function isQuiverAsset(assetId, filePath) {
@@ -96,6 +112,24 @@ function uniqueDest(destPath) {
     return destPath;
 }
 
+function checkedCount() {
+    var n = 0;
+    for (var i = 0; i < rowCheckboxes.length; i++) {
+        if (rowCheckboxes[i].getValue()) n++;
+    }
+    return n;
+}
+
+function updateTitle() {
+    if (lastScanResult.length === 0) return;
+    var checked = checkedCount();
+    previewTitleLabel.setText(
+        lastScanResult.length + " external asset" + (lastScanResult.length !== 1 ? "s" : "") +
+        " found, " + checked + " selected:"
+    );
+    previewTitleLabel.setTextColor("#ffffff");
+}
+
 // =============================================================================
 // SCAN
 // =============================================================================
@@ -111,6 +145,7 @@ function scanExternalAssets() {
     }
     assetsPath = normalise(assetsPath);
 
+    var excludeRefs = excludeRefsCheckbox.getValue();
     var allAssets = api.getAssetWindowLayers(false);
     var external = [];
     var categorize = categorizeCheckbox.getValue();
@@ -126,6 +161,8 @@ function scanExternalAssets() {
         var filePath = "";
         try { filePath = api.getAssetFilePath(id); } catch (e) {}
         if (!filePath || filePath === "") continue;
+
+        if (excludeRefs && isReferenceFile(filePath)) continue;
 
         if (!api.filePathExists(filePath)) continue;
 
@@ -155,6 +192,10 @@ function scanExternalAssets() {
 // =============================================================================
 
 function clearPreviewTable() {
+    rowCheckboxes = [];
+
+    checkColumn = new ui.VLayout();
+    checkColumn.setSpaceBetween(2);
     pathsColumn = new ui.VLayout();
     pathsColumn.setSpaceBetween(2);
     typesColumn = new ui.VLayout();
@@ -163,7 +204,8 @@ function clearPreviewTable() {
     destColumn.setSpaceBetween(2);
 
     tableContainer = new ui.HLayout();
-    tableContainer.setSpaceBetween(8);
+    tableContainer.setSpaceBetween(4);
+    tableContainer.add(checkColumn);
     tableContainer.add(pathsColumn);
     tableContainer.add(typesColumn);
     tableContainer.add(destColumn);
@@ -177,6 +219,11 @@ function updatePreview(results) {
 
     for (var i = 0; i < results.length; i++) {
         var r = results[i];
+
+        var cb = new ui.Checkbox(true);
+        cb.onValueChanged = function () { updateTitle(); };
+        rowCheckboxes.push(cb);
+        checkColumn.add(cb);
 
         var nameLabel = new ui.Label(r.name);
         nameLabel.setTextColor(ui.getThemeColor("Text"));
@@ -206,8 +253,8 @@ function doConsolidate() {
         return;
     }
 
-    if (lastScanResult.length === 0) {
-        statusLabel.setText("Nothing to consolidate. Run Scan first.");
+    if (lastScanResult.length === 0 || checkedCount() === 0) {
+        statusLabel.setText("Nothing to consolidate. Scan and select assets first.");
         statusLabel.setTextColor(ui.getThemeColor("Light"));
         return;
     }
@@ -217,12 +264,17 @@ function doConsolidate() {
 
     var moved = 0;
     var failed = 0;
+    var skipped = 0;
     var dirsCreated = {};
 
     for (var i = 0; i < lastScanResult.length; i++) {
+        if (!rowCheckboxes[i].getValue()) {
+            skipped++;
+            continue;
+        }
+
         var r = lastScanResult[i];
 
-        // Ensure target directory exists (cache so we only create once)
         if (!dirsCreated[r.targetDir]) {
             if (!api.filePathExists(r.targetDir)) {
                 try {
@@ -260,6 +312,9 @@ function doConsolidate() {
     }
 
     var msg = "Done. Consolidated " + moved + " asset" + (moved !== 1 ? "s" : "") + ".";
+    if (skipped > 0) {
+        msg += " " + skipped + " skipped.";
+    }
     if (failed > 0) {
         msg += " " + failed + " failed (see Console).";
     }
@@ -282,6 +337,7 @@ var mainLayout = new ui.VLayout();
 mainLayout.setMargins(margin, margin, margin, margin);
 mainLayout.setSpaceBetween(spacing);
 
+// Options row
 var categorizeLabel = new ui.Label("Categorize by type");
 categorizeLabel.setTextColor(ui.getThemeColor("Light"));
 var categorizeRow = new ui.HLayout();
@@ -290,16 +346,29 @@ categorizeRow.add(categorizeLabel);
 categorizeRow.addStretch();
 mainLayout.add(categorizeRow);
 
-var subfolderHint = new ui.Label("Audio / Footage / Fonts / Images / Quiver");
 subfolderHint.setTextColor(ui.getThemeColor("Midlight"));
 mainLayout.add(subfolderHint);
+
+var excludeRefsLabel = new ui.Label("Exclude reference comps (.cv/.cvc)");
+excludeRefsLabel.setTextColor(ui.getThemeColor("Light"));
+var excludeRefsRow = new ui.HLayout();
+excludeRefsRow.add(excludeRefsCheckbox);
+excludeRefsRow.add(excludeRefsLabel);
+mainLayout.add(excludeRefsRow);
 
 mainLayout.addSpacing(2);
 mainLayout.add(scanButton);
 
+// Preview header
+var previewHeaderRow = new ui.HLayout();
 var previewTitleLabel = new ui.Label("External assets will appear here after scanning.");
 previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
-mainLayout.add(previewTitleLabel);
+previewHeaderRow.add(previewTitleLabel);
+previewHeaderRow.addStretch();
+previewHeaderRow.add(selectAllButton);
+previewHeaderRow.add(selectNoneButton);
+mainLayout.add(previewHeaderRow);
+
 mainLayout.add(previewScrollView);
 
 mainLayout.add(consolidateButton);
@@ -312,7 +381,7 @@ mainLayout.addStretch();
 // EVENT HANDLERS
 // =============================================================================
 
-scanButton.onClick = function () {
+function runScan() {
     statusLabel.setText("");
     var hadError = false;
     var assetsPath = "";
@@ -326,26 +395,36 @@ scanButton.onClick = function () {
         previewTitleLabel.setText("All assets are already inside the Project Assets folder.");
         previewTitleLabel.setTextColor(ui.getThemeColor("Accent1"));
     } else if (results.length > 0) {
-        previewTitleLabel.setText(results.length + " external asset" + (results.length !== 1 ? "s" : "") + " found:");
-        previewTitleLabel.setTextColor("#ffffff");
+        updateTitle();
     }
-};
+}
+
+scanButton.onClick = function () { runScan(); };
 
 categorizeCheckbox.onValueChanged = function () {
-    if (lastScanResult.length > 0) {
-        var results = scanExternalAssets();
-        updatePreview(results);
-        if (results.length > 0) {
-            previewTitleLabel.setText(results.length + " external asset" + (results.length !== 1 ? "s" : "") + " found:");
-            previewTitleLabel.setTextColor("#ffffff");
-        }
-    }
     subfolderHint.setTextColor(categorizeCheckbox.getValue() ? ui.getThemeColor("Midlight") : ui.getThemeColor("Dark"));
+    if (lastScanResult.length > 0) runScan();
 };
 
-consolidateButton.onClick = function () {
-    doConsolidate();
+excludeRefsCheckbox.onValueChanged = function () {
+    if (lastScanResult.length > 0) runScan();
 };
+
+selectAllButton.onClick = function () {
+    for (var i = 0; i < rowCheckboxes.length; i++) {
+        rowCheckboxes[i].setValue(true);
+    }
+    updateTitle();
+};
+
+selectNoneButton.onClick = function () {
+    for (var i = 0; i < rowCheckboxes.length; i++) {
+        rowCheckboxes[i].setValue(false);
+    }
+    updateTitle();
+};
+
+consolidateButton.onClick = function () { doConsolidate(); };
 
 // =============================================================================
 // INIT
@@ -354,6 +433,6 @@ consolidateButton.onClick = function () {
 clearPreviewTable();
 ui.add(mainLayout);
 ui.setBackgroundColor(ui.getThemeColor("Base"));
-ui.setMinimumWidth(340);
-ui.setMinimumHeight(420);
+ui.setMinimumWidth(380);
+ui.setMinimumHeight(440);
 ui.show();
