@@ -9,9 +9,11 @@ ui.setTitle("Consolidate Assets");
 // =============================================================================
 
 var categorizeCheckbox = new ui.Checkbox(true);
+var sceneSubfolderCheckbox = new ui.Checkbox(false);
+var moveInternalCheckbox = new ui.Checkbox(false);
 var excludeRefsCheckbox = new ui.Checkbox(true);
 
-var scanButton = new ui.Button("Scan for External Assets");
+var scanButton = new ui.Button("Refresh");
 var consolidateButton = new ui.Button("Consolidate");
 
 var selectAllButton = new ui.Button("All");
@@ -23,11 +25,7 @@ statusLabel.setTextColor(ui.getThemeColor("Accent1"));
 var previewScrollView = new ui.ScrollView();
 previewScrollView.setFixedHeight(260);
 
-var checkColumn;
-var pathsColumn;
-var typesColumn;
-var destColumn;
-var tableContainer;
+var rowsContainer;
 
 // Tracks the last scan result so Consolidate can act on it
 var lastScanResult = [];
@@ -72,6 +70,21 @@ function extensionFromPath(p) {
     var dot = name.lastIndexOf(".");
     if (dot <= 0) return "";
     return name.substring(dot);
+}
+
+function deriveSceneFolder() {
+    var scenePath = "";
+    try { scenePath = api.getSceneFilePath(); } catch (e) {}
+    if (!scenePath || scenePath === "") return "";
+
+    var base = baseNameFromPath(scenePath);
+    // Strip trailing version: _v01, _v2.1, _V120
+    base = base.replace(/_[vV]\d+(\.\d+)?$/, "");
+    // Strip trailing bare number: _1, _02, _123
+    base = base.replace(/_\d+$/, "");
+    // Strip trailing 2-letter initials: _AA, _Xz
+    base = base.replace(/_[A-Za-z]{2}$/, "");
+    return base;
 }
 
 function isReferenceFile(filePath) {
@@ -123,9 +136,9 @@ function checkedCount() {
 function updateTitle() {
     if (lastScanResult.length === 0) return;
     var checked = checkedCount();
-    previewTitleLabel.setText(
+    statusLabel.setText(
         lastScanResult.length + " external asset" + (lastScanResult.length !== 1 ? "s" : "") +
-        " found, " + checked + " selected:"
+        " found, " + checked + " selected"
     );
     previewTitleLabel.setTextColor("#ffffff");
 }
@@ -149,6 +162,10 @@ function scanExternalAssets() {
     var allAssets = api.getAssetWindowLayers(false);
     var external = [];
     var categorize = categorizeCheckbox.getValue();
+    var useSceneFolder = sceneSubfolderCheckbox.getValue();
+    var sceneFolder = useSceneFolder ? deriveSceneFolder() : "";
+    var moveInternal = moveInternalCheckbox.getValue() && useSceneFolder && sceneFolder !== "";
+    var sceneFolderPath = sceneFolder !== "" ? assetsPath + "/" + sceneFolder : "";
 
     for (var i = 0; i < allAssets.length; i++) {
         var id = allAssets[i];
@@ -166,10 +183,18 @@ function scanExternalAssets() {
 
         if (!api.filePathExists(filePath)) continue;
 
-        if (startsWith(normalise(filePath), assetsPath)) continue;
+        var normPath = normalise(filePath);
+        var isInternal = startsWith(normPath, assetsPath);
+
+        if (isInternal) {
+            if (!moveInternal) continue;
+            if (sceneFolderPath !== "" && startsWith(normPath, sceneFolderPath)) continue;
+        }
 
         var sub = categorize ? subfolder(assetType, id, filePath) : "";
-        var targetDir = sub !== "" ? assetsPath + "/" + sub : assetsPath;
+        var targetDir = assetsPath;
+        if (sceneFolder !== "") targetDir += "/" + sceneFolder;
+        if (sub !== "") targetDir += "/" + sub;
         var targetPath = targetDir + "/" + fileNameFromPath(filePath);
 
         external.push({
@@ -179,7 +204,8 @@ function scanExternalAssets() {
             srcPath: filePath,
             targetDir: targetDir,
             targetPath: targetPath,
-            sub: sub
+            sub: sub,
+            isInternal: isInternal
         });
     }
 
@@ -193,24 +219,9 @@ function scanExternalAssets() {
 
 function clearPreviewTable() {
     rowCheckboxes = [];
-
-    checkColumn = new ui.VLayout();
-    checkColumn.setSpaceBetween(2);
-    pathsColumn = new ui.VLayout();
-    pathsColumn.setSpaceBetween(2);
-    typesColumn = new ui.VLayout();
-    typesColumn.setSpaceBetween(2);
-    destColumn = new ui.VLayout();
-    destColumn.setSpaceBetween(2);
-
-    tableContainer = new ui.HLayout();
-    tableContainer.setSpaceBetween(4);
-    tableContainer.add(checkColumn);
-    tableContainer.add(pathsColumn);
-    tableContainer.add(typesColumn);
-    tableContainer.add(destColumn);
-
-    previewScrollView.setLayout(tableContainer);
+    rowsContainer = new ui.VLayout();
+    rowsContainer.setSpaceBetween(2);
+    previewScrollView.setLayout(rowsContainer);
 }
 
 function updatePreview(results) {
@@ -219,25 +230,28 @@ function updatePreview(results) {
 
     for (var i = 0; i < results.length; i++) {
         var r = results[i];
+        var row = new ui.HLayout();
+        row.setSpaceBetween(6);
 
         var cb = new ui.Checkbox(true);
         cb.onValueChanged = function () { updateTitle(); };
         rowCheckboxes.push(cb);
-        checkColumn.add(cb);
+        row.add(cb);
 
-        var nameLabel = new ui.Label(r.name);
+        var displayName = r.name.length > 45 ? r.name.substring(0, 42) + "..." : r.name;
+        var nameLabel = new ui.Label(displayName.split(" ").join("\u00A0"));
         nameLabel.setTextColor(ui.getThemeColor("Text"));
-        pathsColumn.add(nameLabel);
+        row.add(nameLabel);
+
+        row.addStretch();
 
         var typeLabel = new ui.Label(r.type);
         typeLabel.setTextColor(ui.getThemeColor("Midlight"));
-        typeLabel.setFixedWidth(60);
-        typesColumn.add(typeLabel);
+        row.add(typeLabel);
 
-        var destLabel = new ui.Label(r.sub !== "" ? r.sub + "/" : "Assets/");
-        destLabel.setTextColor(ui.getThemeColor("Accent1"));
-        destColumn.add(destLabel);
+        rowsContainer.add(row);
     }
+    rowsContainer.addStretch();
 }
 
 // =============================================================================
@@ -308,6 +322,15 @@ function doConsolidate() {
         } catch (e) {
             console.log("Relink error for " + r.name + ": " + e);
             failed++;
+            continue;
+        }
+
+        if (r.isInternal) {
+            try {
+                api.deleteFilePath(r.srcPath);
+            } catch (e) {
+                console.log("Could not remove original: " + r.srcPath + ": " + e);
+            }
         }
     }
 
@@ -346,8 +369,21 @@ categorizeRow.add(categorizeLabel);
 categorizeRow.addStretch();
 mainLayout.add(categorizeRow);
 
-subfolderHint.setTextColor(ui.getThemeColor("Midlight"));
-mainLayout.add(subfolderHint);
+var sceneSubfolderLabel = new ui.Label("Group assets in scene subfolder");
+sceneSubfolderLabel.setTextColor(ui.getThemeColor("Light"));
+var sceneSubfolderRow = new ui.HLayout();
+sceneSubfolderRow.add(sceneSubfolderCheckbox);
+sceneSubfolderRow.add(sceneSubfolderLabel);
+mainLayout.add(sceneSubfolderRow);
+
+var moveInternalLabel = new ui.Label("Move existing assets into scene subfolder");
+moveInternalLabel.setTextColor(ui.getThemeColor("Light"));
+var moveInternalRow = new ui.HLayout();
+moveInternalRow.add(moveInternalCheckbox);
+moveInternalRow.add(moveInternalLabel);
+moveInternalRow.addStretch();
+mainLayout.add(moveInternalRow);
+moveInternalRow.setHidden(true);
 
 var excludeRefsLabel = new ui.Label("Exclude reference comps (.cv/.cvc)");
 excludeRefsLabel.setTextColor(ui.getThemeColor("Light"));
@@ -357,11 +393,10 @@ excludeRefsRow.add(excludeRefsLabel);
 mainLayout.add(excludeRefsRow);
 
 mainLayout.addSpacing(2);
-mainLayout.add(scanButton);
 
 // Preview header
 var previewHeaderRow = new ui.HLayout();
-var previewTitleLabel = new ui.Label("External assets will appear here after scanning.");
+var previewTitleLabel = new ui.Label("Select");
 previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
 previewHeaderRow.add(previewTitleLabel);
 previewHeaderRow.addStretch();
@@ -370,12 +405,13 @@ previewHeaderRow.add(selectNoneButton);
 mainLayout.add(previewHeaderRow);
 
 mainLayout.add(previewScrollView);
-
-mainLayout.add(consolidateButton);
-
-mainLayout.addSpacing(2);
 mainLayout.add(statusLabel);
-mainLayout.addStretch();
+mainLayout.addSpacing(2);
+
+var consolidateRow = new ui.HLayout();
+consolidateRow.add(scanButton);
+consolidateRow.add(consolidateButton);
+mainLayout.add(consolidateRow);
 
 // =============================================================================
 // EVENT HANDLERS
@@ -392,8 +428,8 @@ function runScan() {
     var results = scanExternalAssets();
     updatePreview(results);
     if (results.length === 0 && !hadError) {
-        previewTitleLabel.setText("All assets are already inside the Project Assets folder.");
-        previewTitleLabel.setTextColor(ui.getThemeColor("Accent1"));
+        statusLabel.setText("All assets are already inside the Project Assets folder.");
+        statusLabel.setTextColor(ui.getThemeColor("Accent1"));
     } else if (results.length > 0) {
         updateTitle();
     }
@@ -402,7 +438,17 @@ function runScan() {
 scanButton.onClick = function () { runScan(); };
 
 categorizeCheckbox.onValueChanged = function () {
-    subfolderHint.setTextColor(categorizeCheckbox.getValue() ? ui.getThemeColor("Midlight") : ui.getThemeColor("Dark"));
+    if (lastScanResult.length > 0) runScan();
+};
+
+sceneSubfolderCheckbox.onValueChanged = function () {
+    var on = sceneSubfolderCheckbox.getValue();
+    moveInternalRow.setHidden(!on);
+    if (!on) moveInternalCheckbox.setValue(false);
+    if (lastScanResult.length > 0) runScan();
+};
+
+moveInternalCheckbox.onValueChanged = function () {
     if (lastScanResult.length > 0) runScan();
 };
 
@@ -430,9 +476,9 @@ consolidateButton.onClick = function () { doConsolidate(); };
 // INIT
 // =============================================================================
 
-clearPreviewTable();
 ui.add(mainLayout);
 ui.setBackgroundColor(ui.getThemeColor("Base"));
 ui.setMinimumWidth(380);
 ui.setMinimumHeight(440);
 ui.show();
+runScan();
