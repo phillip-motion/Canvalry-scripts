@@ -273,6 +273,22 @@ function doConsolidate() {
         return;
     }
 
+    var hasInternal = false;
+    for (var c = 0; c < lastScanResult.length; c++) {
+        if (rowCheckboxes[c].getValue() && lastScanResult[c].isInternal) {
+            hasInternal = true;
+            break;
+        }
+    }
+    if (hasInternal) {
+        var modal = new ui.Modal();
+        var proceed = modal.showQuestion(
+            "Move files",
+            "This will delete selected files from their original location and move them into the scene subfolder. Make sure no one else is using these files.\n\nContinue?"
+        );
+        if (!proceed) return;
+    }
+
     console.log("Auto-saving scene before consolidation...");
     api.saveScene();
 
@@ -381,9 +397,9 @@ moveInternalLabel.setTextColor(ui.getThemeColor("Light"));
 var moveInternalRow = new ui.HLayout();
 moveInternalRow.add(moveInternalCheckbox);
 moveInternalRow.add(moveInternalLabel);
-moveInternalRow.addStretch();
 mainLayout.add(moveInternalRow);
-moveInternalRow.setHidden(true);
+moveInternalCheckbox.setHidden(true);
+moveInternalLabel.setHidden(true);
 
 var excludeRefsLabel = new ui.Label("Exclude reference comps (.cv/.cvc)");
 excludeRefsLabel.setTextColor(ui.getThemeColor("Light"));
@@ -443,7 +459,8 @@ categorizeCheckbox.onValueChanged = function () {
 
 sceneSubfolderCheckbox.onValueChanged = function () {
     var on = sceneSubfolderCheckbox.getValue();
-    moveInternalRow.setHidden(!on);
+    moveInternalCheckbox.setHidden(!on);
+    moveInternalLabel.setHidden(!on);
     if (!on) moveInternalCheckbox.setValue(false);
     if (lastScanResult.length > 0) runScan();
 };
@@ -482,3 +499,88 @@ ui.setMinimumWidth(380);
 ui.setMinimumHeight(440);
 ui.show();
 runScan();
+
+// =============================================================================
+// UPDATE CHECKER
+// =============================================================================
+
+var GITHUB_REPO = "phillip-motion/Canvalry-scripts";
+var scriptName = "Consolidate Assets";
+var currentVersion = "1.0.0";
+
+function compareVersions(v1, v2) {
+    var parts1 = v1.split('.').map(function(n) { return parseInt(n, 10) || 0; });
+    var parts2 = v2.split('.').map(function(n) { return parseInt(n, 10) || 0; });
+    for (var i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+        var num1 = parts1[i] || 0;
+        var num2 = parts2[i] || 0;
+        if (num1 > num2) return 1;
+        if (num1 < num2) return -1;
+    }
+    return 0;
+}
+
+function checkForUpdate(githubRepo, scriptName, currentVersion, callback) {
+    var now = new Date().getTime();
+    var oneDayAgo = now - (24 * 60 * 60 * 1000);
+    var shouldFetchFromGithub = true;
+    var cachedLatestVersion = null;
+
+    if (api.hasPreferenceObject(scriptName + "_update_check")) {
+        var prefs = api.getPreferenceObject(scriptName + "_update_check");
+        cachedLatestVersion = prefs.latestVersion;
+        if (prefs.lastCheck && prefs.lastCheck > oneDayAgo) {
+            shouldFetchFromGithub = false;
+        }
+    }
+
+    if (!shouldFetchFromGithub && cachedLatestVersion) {
+        var updateAvailable = compareVersions(cachedLatestVersion, currentVersion) > 0;
+        if (updateAvailable) {
+            console.warn(scriptName + ' ' + cachedLatestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
+            if (callback) callback(true, cachedLatestVersion);
+        } else {
+            if (callback) callback(false);
+        }
+        return;
+    }
+
+    try {
+        var path = "/" + githubRepo + "/main/versions.json";
+        var client = new api.WebClient("https://raw.githubusercontent.com");
+        client.get(path);
+
+        if (client.status() === 200) {
+            var versions = JSON.parse(client.body());
+            var latestVersion = versions[scriptName];
+
+            if (!latestVersion) {
+                if (callback) callback(false);
+                return;
+            }
+
+            if (latestVersion.startsWith('v')) {
+                latestVersion = latestVersion.substring(1);
+            }
+
+            api.setPreferenceObject(scriptName + "_update_check", {
+                lastCheck: new Date().getTime(),
+                latestVersion: latestVersion
+            });
+
+            var updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+            if (updateAvailable) {
+                console.warn(scriptName + ' ' + latestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
+                if (callback) callback(true, latestVersion);
+            } else {
+                if (callback) callback(false);
+            }
+        } else {
+            if (callback) callback(false);
+        }
+    } catch (e) {
+        if (callback) callback(false);
+    }
+}
+
+checkForUpdate(GITHUB_REPO, scriptName, currentVersion);
