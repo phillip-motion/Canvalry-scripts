@@ -1,5 +1,13 @@
 # Changelog
 
+
+## [1.2.0] - 2026-04-04
+
+### Added
+- Reveal Asset in Finder: simply shows the selected asset in Finder
+- Consolidate Assets: copies any external assets into your project assets folder and relinks them automatically
+
+
 ## [1.1.0] - 2026-03-11
 
 ### Added
