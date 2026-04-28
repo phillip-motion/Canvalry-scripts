@@ -150,7 +150,7 @@ function scanExternalAssets() {
     var assetsPath = "";
     try { assetsPath = api.getAssetPath(); } catch (e) {}
     if (!assetsPath || assetsPath === "") {
-        statusLabel.setText("No Project set. Set a Project first via Assets > Project Settings.");
+        statusLabel.setText("No Project set. Set a Project first via File > Project Settings.");
         statusLabel.setTextColor("#ff6666");
         lastScanResult = [];
         return [];
@@ -251,7 +251,7 @@ function doConsolidate() {
     var assetsPath = "";
     try { assetsPath = api.getAssetPath(); } catch (e) {}
     if (!assetsPath || assetsPath === "") {
-        statusLabel.setText("No Project set. Set a Project first via Assets > Project Settings.");
+        statusLabel.setText("No Project set. Set a Project first via File > Project Settings.");
         statusLabel.setTextColor("#ff6666");
         return;
     }

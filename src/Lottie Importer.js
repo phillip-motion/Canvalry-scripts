@@ -913,6 +913,7 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
     var localFillOpacityKs = null;
     var localRdValue = null;
     var localOpAmount = null;
+    var localTrimItem = null;
     var localPolyStars = [];
 
     var localFillRule = null;
@@ -990,6 +991,28 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             if (Array.isArray(opA)) opA = opA[0];
             localOpAmount = opA;
         }
+        if (item.ty === "tm") localTrimItem = item;
+    }
+
+    var localTrimInfo = null;
+    if (localTrimItem) {
+        var tmStartVal = getStaticValue(localTrimItem.s, 0);
+        if (Array.isArray(tmStartVal)) tmStartVal = tmStartVal[0];
+        var tmEndVal = getStaticValue(localTrimItem.e, 100);
+        if (Array.isArray(tmEndVal)) tmEndVal = tmEndVal[0];
+        var tmOffVal = 0;
+        if (localTrimItem.o) {
+            tmOffVal = getStaticValue(localTrimItem.o, 0);
+            if (Array.isArray(tmOffVal)) tmOffVal = tmOffVal[0];
+        }
+        localTrimInfo = {
+            start: tmStartVal,
+            end: tmEndVal,
+            offset: tmOffVal,
+            startKs: (localTrimItem.s && singleValuePropIsAnimated(localTrimItem.s)) ? localTrimItem.s : null,
+            endKs: (localTrimItem.e && singleValuePropIsAnimated(localTrimItem.e)) ? localTrimItem.e : null,
+            offsetKs: (localTrimItem.o && singleValuePropIsAnimated(localTrimItem.o)) ? localTrimItem.o : null
+        };
     }
 
     var tr = extractGroupTransform(trItem);
@@ -1038,7 +1061,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 opAmount: localOpAmount,
                 groupScaleX: newSX,
                 groupScaleY: newSY,
-                fillBlendMode: localFillBlendMode
+                fillBlendMode: localFillBlendMode,
+                trimInfo: localTrimInfo
             });
         } else if (compParts.length === 1) {
             results.push({
@@ -1062,7 +1086,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 groupScaleY: newSY,
                 fillBlendMode: localFillBlendMode,
                 elItem: localShapes[0].elItem || null,
-                rcItem: localShapes[0].rcItem || null
+                rcItem: localShapes[0].rcItem || null,
+                trimInfo: localTrimInfo
             });
         }
     } else {
@@ -1093,7 +1118,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                     groupScaleY: newSY,
                     fillBlendMode: localFillBlendMode,
                     elItem: localShapes[si].elItem || null,
-                    rcItem: localShapes[si].rcItem || null
+                    rcItem: localShapes[si].rcItem || null,
+                    trimInfo: localTrimInfo
                 });
             }
         }
@@ -1120,7 +1146,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             polyStar: localPolyStars[psi],
             groupScaleX: newSX,
             groupScaleY: newSY,
-            fillBlendMode: localFillBlendMode
+            fillBlendMode: localFillBlendMode,
+            trimInfo: localTrimInfo
         });
     }
 
@@ -1239,7 +1266,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 fillColorKs: localFillColorKs,
                 fillOpacityKs: localFillOpacityKs,
                 rdValue: localRdValue,
-                opAmount: localOpAmount
+                opAmount: localOpAmount,
+                trimInfo: localTrimInfo
             });
             return;
         }
@@ -1855,6 +1883,114 @@ function keyframeTrimTravel(nodeId, ks, timeOffset) {
         } catch (e) {}
     }
     applyLottieEasing(nodeId, "stroke.trimTravel", kfs, ks.k, 0);
+}
+
+// --- Auto-orient (ao:1) — bake rotation from position path tangent ---
+// Cubic bezier evaluation: B(t) = (1-t)³p0 + 3(1-t)²t·p1 + 3(1-t)t²·p2 + t³·p3
+function cbVal(p0, p1, p2, p3, t) {
+    var u = 1 - t;
+    return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
+}
+// Tangent: B'(t) = 3(1-t)²(p1-p0) + 6(1-t)t(p2-p1) + 3t²(p3-p2)
+function cbDeriv(p0, p1, p2, p3, t) {
+    var u = 1 - t;
+    return 3 * u * u * (p1 - p0) + 6 * u * t * (p2 - p1) + 3 * t * t * (p3 - p2);
+}
+// Newton's method: solve cubic-bezier x(t) = target for t, where x(t) = cbVal(0,cx1,cx2,1,t)
+function solveCbX(cx1, cx2, target) {
+    if (target <= 0) return 0;
+    if (target >= 1) return 1;
+    var t = target;
+    for (var i = 0; i < 12; i++) {
+        var x = cbVal(0, cx1, cx2, 1, t);
+        var dx = cbDeriv(0, cx1, cx2, 1, t);
+        if (Math.abs(dx) < 1e-12) break;
+        t -= (x - target) / dx;
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        if (Math.abs(x - target) < 1e-9) break;
+    }
+    return t;
+}
+
+function applyAutoOrient(nodeId, layer, yFlip, timeOffset) {
+    if (layer.ao !== 1) return;
+    var ks = layer.ks;
+    if (!ks || !ks.p) return;
+    var posKs = ks.p;
+    if (posKs.s || posKs.a !== 1 || !posKs.k || posKs.k.length < 2) return;
+
+    var kfs = posKs.k;
+    var tOff = timeOffset || 0;
+
+    // Static rotation offset (raw Lottie value before yFlip)
+    var baseRotAE = 0;
+    if (ks.r && ks.r.a !== 1) {
+        var rv = ks.r.k;
+        baseRotAE = (typeof rv === "number") ? rv : (Array.isArray(rv) ? rv[0] : 0);
+    }
+
+    var DEG = 180 / Math.PI;
+
+    for (var seg = 0; seg < kfs.length - 1; seg++) {
+        var kf0 = kfs[seg];
+        var kf1 = kfs[seg + 1];
+        if (kf0.t == null || kf1.t == null) continue;
+        var fStart = Math.round(kf0.t);
+        var fEnd = Math.round(kf1.t);
+        if (fStart >= fEnd) continue;
+
+        var s0 = kf0.s || kf0.e;
+        var s1 = kf1.s;
+        if (!s0 || !s1) continue;
+
+        var P0x = s0[0], P0y = s0[1];
+        var P3x = s1[0], P3y = s1[1];
+        var P1x = P0x + ((kf0.to && kf0.to[0]) || 0);
+        var P1y = P0y + ((kf0.to && kf0.to[1]) || 0);
+        var P2x = P3x + ((kf0.ti && kf0.ti[0]) || 0);
+        var P2y = P3y + ((kf0.ti && kf0.ti[1]) || 0);
+
+        // Temporal easing control points (handles may be arrays for multi-dim)
+        var ox = 0, oy = 0, ix = 1, iy = 1;
+        if (kf0.o && kf0.o.x != null) {
+            ox = Array.isArray(kf0.o.x) ? kf0.o.x[0] : kf0.o.x;
+            oy = Array.isArray(kf0.o.y) ? kf0.o.y[0] : kf0.o.y;
+        }
+        if (kf0.i && kf0.i.x != null) {
+            ix = Array.isArray(kf0.i.x) ? kf0.i.x[0] : kf0.i.x;
+            iy = Array.isArray(kf0.i.y) ? kf0.i.y[0] : kf0.i.y;
+        }
+
+        var lastFrame = (seg === kfs.length - 2) ? fEnd : fEnd - 1;
+        for (var f = fStart; f <= lastFrame; f++) {
+            var u = (f - fStart) / (fEnd - fStart);
+            if (u < 0) u = 0;
+            if (u > 1) u = 1;
+
+            // Temporal ease: solve for bezier parameter, then evaluate value curve
+            var tP = solveCbX(ox, ix, u);
+            var s = cbVal(0, oy, iy, 1, tP);
+            if (s < 0) s = 0;
+            if (s > 1) s = 1;
+
+            var dtx = cbDeriv(P0x, P1x, P2x, P3x, s);
+            var dty = cbDeriv(P0y, P1y, P2y, P3y, s);
+
+            // Degenerate tangent: fall back to chord direction
+            if (Math.abs(dtx) < 1e-10 && Math.abs(dty) < 1e-10) {
+                dtx = P3x - P0x;
+                dty = P3y - P0y;
+            }
+
+            // Lottie Y-down atan2 gives CW-positive angle; combine with base, then yFlip
+            var aeAngle = Math.atan2(dty, dtx) * DEG;
+            var combined = aeAngle + baseRotAE;
+            var cavRot = yFlip ? -combined : combined;
+
+            try { api.keyframe(nodeId, f + tOff, { "rotation.z": cavRot }); } catch (e) {}
+        }
+    }
 }
 
 // --- Animate shape path keyframes ---
@@ -3456,6 +3592,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         api.set(tXform, setProps);
         keyframeAnimatedTransforms(tXform, tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor, tOff, precompDims, parentPCD, usePivotRig,
             entry.kind === "null");
+        applyAutoOrient(tXform, tLayer, yFlip, tOff);
     }
 
     // Apply transforms to matte proxy groups (duplicating the matte source's local transforms)
