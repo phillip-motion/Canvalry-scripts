@@ -114,29 +114,21 @@ function buildParentMap() {
     building = true;
     try {
         parentMap = {};
-        var allComps = api.getComps();
-        var savedComp = api.getActiveComp();
-
-        for (var i = 0; i < allComps.length; i++) {
-            var comp = allComps[i];
+        // ponytail: scene-wide layer walk — never touch setActiveComp, which opens a tab per comp
+        var refs = api.getAllSceneLayers();
+        for (var r = 0; r < refs.length; r++) {
+            var ref = refs[r];
+            if (ref.indexOf("compositionReference#") !== 0) continue;
             try {
-                api.setActiveComp(comp);
-                var refs = api.getCompLayersOfType(false, "compositionReference");
-                for (var r = 0; r < refs.length; r++) {
-                    try {
-                        var childComp = api.getCompFromReference(refs[r]);
-                        if (childComp) {
-                            if (!parentMap[childComp]) parentMap[childComp] = [];
-                            if (parentMap[childComp].indexOf(comp) === -1) {
-                                parentMap[childComp].push(comp);
-                            }
-                        }
-                    } catch (e) {}
+                var childComp = api.getCompFromReference(ref);
+                var parentComp = api.getParentComp(ref);
+                if (!childComp || !parentComp) continue;
+                if (!parentMap[childComp]) parentMap[childComp] = [];
+                if (parentMap[childComp].indexOf(parentComp) === -1) {
+                    parentMap[childComp].push(parentComp);
                 }
             } catch (e) {}
         }
-
-        if (savedComp) api.setActiveComp(savedComp);
     } finally {
         building = false;
     }

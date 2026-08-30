@@ -10,3 +10,4 @@ build/*unencrypted*.js
 dist/
 .pi/extensions/guardrails.json
 .DS_Store
+.qwen/

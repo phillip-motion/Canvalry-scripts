@@ -6,12 +6,23 @@
 // This script preserves the exact visual easing when converting between frame rates
 // by extracting cubic bezier values and reapplying them to new frame timing.
 //
+// WHAT GETS RETIMED:
+// 1. Keyframes - moved by the frame rate ratio, with collision handling so they can't reorder
+// 2. Easing - bezier handles scaled along the time axis only, per segment, so curves (and
+//    therefore motion paths) come out identical
+// 3. Footage and audio - Image Shader time offsets and Sound frame offsets
+// 4. Frame-based Attributes on behaviours, deformers and groups (see FRAME_ATTRIBUTES)
+// 5. Layer in/out points, Composition frame range and playback range
+//
+// Pre-Comps are left alone on purpose: Cavalry re-interpolates a Pre-Comp to its parent's
+// frame rate (or preserves its own rate when Preserve Frame Rate is on), so their contents
+// stay in sync without being touched.
+//
 // KEY LEARNINGS ABOUT CAVALRY EASING:
 // 1. Use api.modifyKeyframeTangent() for reliable bezier handle modification
-// 2. Get fresh keyframe IDs after moving keyframes (original IDs become invalid)
-// 3. Convert Cavalry bezier format ↔ cubic-bezier format for proper scaling
-// 4. Process keyframes in pairs to maintain easing relationships
-// 5. Handle multiple attributes/layers simultaneously
+// 2. Address handles by layer + frame - keyframe IDs go stale as soon as keyframes move
+// 3. Keyframe values don't change during a retime, so handle Y must not change either
+// 4. Scale each segment by its own duration ratio to absorb rounding
 
 // Check Update from Github
 // Usage:
@@ -33,7 +44,7 @@
 
 var GITHUB_REPO = "phillip-motion/Canvalry-scripts";
 var scriptName = "Convert Frame Rate";  // Must match key your repo's versions.json
-var currentVersion = "1.0.0";
+var currentVersion = "1.1.0";
 
 function compareVersions(v1, v2) {
     /* Compare two semantic version strings (e.g., "1.0.0" vs "1.0.1") */
@@ -207,6 +218,45 @@ function createUI() {
 // Execute main function
 main();
 
+// Attributes that hold a number of frames, by layer type. Every one of these scales
+// with the frame rate, otherwise the thing it offsets drifts out of sync.
+// The Frame behaviour is handled separately because one of its Attributes scales inversely.
+var FRAME_ATTRIBUTES = {
+    "sound":           ["frameOffset"],          // audio offset - keeps sound in sync
+    "autoAnimate":     ["timeOffset"],
+    "trails":          ["startFrame", "length", "timeOffset"],
+    "duplicator":      ["shapeTimeOffset"],
+    "schedulingGroup": ["startFrame", "endFrame", "childOffset", "overlap"],
+    "oscillator":      ["timeOffset"],
+    "noise":           ["generator.loopLength"]
+};
+
+// Scale one un-keyframed frame-based Attribute. Keyframed ones are left alone -
+// the keyframe pass has already moved them.
+function scaleFrameAttribute(layerId, attrId, scale) {
+    try {
+        var keys = api.getKeyframeTimes(layerId, attrId);
+        if (keys && keys.length > 0) {
+            return;
+        }
+        var value = api.get(layerId, attrId);
+        if (typeof value !== "number" || value === 0) {
+            return;
+        }
+        // Whole-frame Attributes stay whole; rates and increments keep their precision
+        var scaled = value * scale;
+        if (value === Math.round(value)) {
+            scaled = Math.round(scaled);
+        }
+        var payload = {};
+        payload[attrId] = scaled;
+        api.set(layerId, payload);
+        console.log("  - " + layerId + " " + attrId + ": " + value + " → " + scaled);
+    } catch (e) {
+        // Attribute absent on this layer, or read-only - nothing to convert
+    }
+}
+
 // Main conversion function
 function convertFrameRate(targetFps) {
     activeComp = api.getActiveComp();
@@ -241,34 +291,55 @@ function convertFrameRate(targetFps) {
         
         var processedLayers = 0;
         var totalKeyframes = 0;
-        
-        // Process each layer
+
+        // Read the ranges before anything moves
+        var currentStartFrame = api.get(activeComp, "startFrame");
+        var currentEndFrame = api.get(activeComp, "endFrame");
+        var currentPlaybackStart = api.get(activeComp, "playbackStart");
+        var currentPlaybackEnd = api.get(activeComp, "playbackEnd");
+
+        // When converting upwards, keyframes and out points land beyond the current end of
+        // the Composition and get clamped. Widen the range first so there's room to move
+        // into; the final range is set at the end of the conversion.
+        if (ratio > 1) {
+            api.set(activeComp, {"endFrame": Math.round(currentEndFrame * ratio)});
+        }
+
+        // Record every layer's in/out points before anything moves them. They're written back
+        // at the very end of the conversion, because two later steps disturb them:
+        //
+        //  - A layer and the layers it hosts (an Image Shader inside a Footage Shape) share
+        //    one set of in/out points, so writing the child also writes the parent. Targets
+        //    computed up front from these recorded values make that second write a harmless
+        //    no-op; targets computed from live values would scale those layers twice.
+        //  - Offsetting footage time (below) slides the host layer's in/out points along with it.
+        var inOutPlan = [];
+        for (var i = 0; i < allLayers.length; i++) {
+            if (!api.layerExists(allLayers[i])) {
+                continue;
+            }
+            try {
+                var planIn = api.getInFrame(allLayers[i]);
+                var planOut = api.getOutFrame(allLayers[i]);
+
+                // Skip layers spanning the whole Composition - they have no custom points
+                if (planIn !== 0 || planOut !== currentEndFrame) {
+                    inOutPlan.push({ layerId: allLayers[i], inFrame: planIn, outFrame: planOut });
+                }
+            } catch (e) {
+                // Some layers have no in/out points
+            }
+        }
+
+        // Process each layer's keyframes
         for (var i = 0; i < allLayers.length; i++) {
             var layerId = allLayers[i];
-            
+
             // Check if layer exists
             if (!api.layerExists(layerId)) {
                 continue;
             }
-            
-            // Convert layer in/out points
-            try {
-                var inFrame = api.getInFrame(layerId);
-                var outFrame = api.getOutFrame(layerId);
-                var compEndFrame = api.get(activeComp, "endFrame");
-                
-                // Only convert if the layer has custom in/out points
-                if (inFrame !== 0 || outFrame !== compEndFrame) {
-                    var newInFrame = Math.round(inFrame * ratio);
-                    var newOutFrame = Math.round(outFrame * ratio);
-                    
-                    api.setInFrame(layerId, newInFrame);
-                    api.setOutFrame(layerId, newOutFrame);
-                }
-            } catch (e) {
-                // Some layers might not have in/out frames
-            }
-            
+
             // Get all animated attributes for this layer
             var animatedAttrs = [];
             try {
@@ -287,10 +358,6 @@ function convertFrameRate(targetFps) {
                     var keyframeIds = api.getKeyframeIdsForAttribute(layerId, attrId);
                     
                     if (!keyframeTimes || keyframeTimes.length === 0) {
-                        continue;
-                    }
-                    
-                    if (keyframeTimes.length < 2) {
                         continue;
                     }
                     
@@ -366,136 +433,72 @@ function convertFrameRate(targetFps) {
                         totalKeyframes++;
                     }
                     
-                    // CRITICAL: Fix bezier handles to preserve easing curves when frame rate changes
-                    // 
-                    // PROBLEM: Simply scaling bezier handles by the frame rate ratio doesn't work because:
-                    // 1. Keyframe IDs become invalid after moving keyframes
-                    // 2. Bezier handles need to maintain their cubic bezier curve shape
-                    // 3. Direct scaling distorts the easing feel
+                    // Preserve easing: scale bezier handles along the TIME axis only.
                     //
-                    // SOLUTION: Extract cubic bezier values, then reapply them to new frame timing
-                    // This preserves the exact visual easing while adapting to new frame rates
-                    
-                    // Get fresh keyframe data after the move operations
-                    // IMPORTANT: Original keyframe IDs are invalid after api.modifyKeyframe() calls
-                    var freshKeyframeTimes = api.getKeyframeTimes(layerId, attrId);
-                    var freshKeyframeIds = api.getKeyframeIdsForAttribute(layerId, attrId);
-                    
-                    // Process keyframes in pairs to extract and reapply cubic bezier easing
+                    // A frame rate change is a pure scale of the time axis - keyframe values
+                    // never change, so the handles' Y components must not change either.
+                    // Scaling only X by each segment's own duration ratio reproduces the
+                    // identical curve shape (and therefore the identical motion path, since
+                    // position.x and position.y are independent curves whose shared timing is
+                    // what defines the path). Per-segment ratios also absorb the rounding
+                    // applied above, so a segment that landed 1 frame short still eases right.
+                    //
+                    // Handles are addressed by layer + frame via api.modifyKeyframeTangent();
+                    // keyframe IDs captured before the move are stale and must not be reused.
                     for (var keyIdx = 0; keyIdx < keyframeDataArray.length - 1; keyIdx++) {
                         var currentKeyInfo = keyframeDataArray[keyIdx];
                         var nextKeyInfo = keyframeDataArray[keyIdx + 1];
-                        
-                        // Find the fresh keyframe IDs for the moved keyframes
-                        // We need to match the new frame positions to get valid keyframe IDs
-                        var currentFreshId = null;
-                        var nextFreshId = null;
-                        
-                        for (var freshIdx = 0; freshIdx < freshKeyframeTimes.length; freshIdx++) {
-                            if (freshKeyframeTimes[freshIdx] === currentKeyInfo.newFrame) {
-                                currentFreshId = freshKeyframeIds[freshIdx];
-                            }
-                            if (freshKeyframeTimes[freshIdx] === nextKeyInfo.newFrame) {
-                                nextFreshId = freshKeyframeIds[freshIdx];
-                            }
-                        }
-                        
-                        // Skip if we can't find valid keyframe IDs (shouldn't happen in normal cases)
-                        if (!currentFreshId || !nextFreshId) {
+
+                        var oldDuration = nextKeyInfo.oldFrame - currentKeyInfo.oldFrame;
+                        var newDuration = nextKeyInfo.newFrame - currentKeyInfo.newFrame;
+                        if (oldDuration <= 0) {
                             continue;
                         }
-                        
-                        // Only process bezier interpolation pairs
+                        var timeScale = newDuration / oldDuration;
+
+                        // Outgoing handle of the current keyframe (interpolation 0 = bezier)
                         if (currentKeyInfo.keyData && currentKeyInfo.keyData.interpolation === 0 &&
-                            nextKeyInfo.keyData && nextKeyInfo.keyData.interpolation === 0) {
-                            
+                            currentKeyInfo.keyData.rightBez) {
                             try {
-                                // STEP 1: Extract cubic bezier values from original keyframes
-                                // This converts Cavalry's internal bezier format to standard cubic-bezier values
-                                var originalFrameDiff = nextKeyInfo.oldFrame - currentKeyInfo.oldFrame;
-                                var originalValueDiff = nextKeyInfo.keyData.numValue - currentKeyInfo.keyData.numValue;
-                                
-                                // Get original bezier handles from keyframe data
-                                // rightBez = outgoing handle from current keyframe
-                                // leftBez = incoming handle to next keyframe
-                                var outHandleX = currentKeyInfo.keyData.rightBez ? currentKeyInfo.keyData.rightBez.x : 0;
-                                var outHandleY = currentKeyInfo.keyData.rightBez ? currentKeyInfo.keyData.rightBez.y : 0;
-                                var inHandleX = nextKeyInfo.keyData.leftBez ? nextKeyInfo.keyData.leftBez.x : 0;
-                                var inHandleY = nextKeyInfo.keyData.leftBez ? nextKeyInfo.keyData.leftBez.y : 0;
-                                
-                                // Convert to cubic bezier format (using Easey's proven conversion logic)
-                                // This extracts the pure easing curve independent of frame timing
-                                if (originalFrameDiff === 0) {
-                                    continue; // Avoid division by zero
-                                }
-                                
-                                // Standard cubic-bezier format: cubic-bezier(x1, y1, x2, y2)
-                                // x1, x2 = time control points (0-1 range, but can exceed for extreme curves)
-                                // y1, y2 = value control points (can be any value for overshoot/undershoot)
-                                var x1 = outHandleX / originalFrameDiff;
-                                var y1 = Math.abs(originalValueDiff) > 0.001 ? outHandleY / originalValueDiff : 0;
-                                var x2 = (originalFrameDiff + inHandleX) / originalFrameDiff;
-                                var y2 = Math.abs(originalValueDiff) > 0.001 ? 1 + (inHandleY / originalValueDiff) : 1;
-                                
-                                // STEP 2: Calculate new frame and value differences for the converted keyframes
-                                var newFrameDiff = nextKeyInfo.newFrame - currentKeyInfo.newFrame;
-                                var newValueDiff = nextKeyInfo.keyData.numValue - currentKeyInfo.keyData.numValue;
-                                
-                                // STEP 3: Convert cubic bezier back to Cavalry format with new frame timing
-                                // This applies the same easing curve to the new frame duration
-                                // Using Easey's proven cubicBezierToCavalry conversion logic
-                                var newOutHandleX = x1 * newFrameDiff;        // Scale time control point to new duration
-                                var newOutHandleY = y1 * newValueDiff;        // Scale value control point to new range
-                                var newInHandleX = (x2 - 1) * newFrameDiff;   // Incoming handle is relative to end frame
-                                var newInHandleY = (y2 - 1) * newValueDiff;   // Incoming handle value relative to end value
-                                
-                                // STEP 4: Apply new bezier handles using api.modifyKeyframeTangent()
-                                // 
-                                // CRITICAL API DISCOVERY: Use api.modifyKeyframeTangent(), not api.modifyKeyframe()
-                                // - api.modifyKeyframe(id, 'rightBez.x', value) fails with "undefined" errors
-                                // - api.modifyKeyframeTangent() works reliably (same method Easey uses)
-                                // - Must use fresh keyframe IDs after moving keyframes (original IDs become invalid)
-                                
-                                // Set right handle (outgoing) for current keyframe
-                                try {
-                                    var tangentObj1 = {};
-                                    tangentObj1[attrId] = {
-                                        "frame": currentKeyInfo.newFrame,
-                                        "inHandle": false,
-                                        "outHandle": true,
-                                        "xValue": currentKeyInfo.newFrame + newOutHandleX,  // Absolute position
-                                        "yValue": currentKeyInfo.keyData.numValue + newOutHandleY,  // Absolute value
-                                        "angleLocked": false,
-                                        "weightLocked": false
-                                    };
-                                    api.modifyKeyframeTangent(layerId, tangentObj1);
-                                } catch (e) {
-                                    // Silently handle errors - bezier modification can fail for various reasons
-                                }
-                                
-                                // Set left handle (incoming) for next keyframe
-                                try {
-                                    var tangentObj2 = {};
-                                    tangentObj2[attrId] = {
-                                        "frame": nextKeyInfo.newFrame,
-                                        "inHandle": true,
-                                        "outHandle": false,
-                                        "xValue": nextKeyInfo.newFrame + newInHandleX,  // Absolute position
-                                        "yValue": nextKeyInfo.keyData.numValue + newInHandleY,  // Absolute value
-                                        "angleLocked": false,
-                                        "weightLocked": false
-                                    };
-                                    api.modifyKeyframeTangent(layerId, tangentObj2);
-                                } catch (e) {
-                                    // Silently handle errors - bezier modification can fail for various reasons
-                                }
-                                
+                                var outBez = currentKeyInfo.keyData.rightBez;
+                                var outTangent = {};
+                                outTangent[attrId] = {
+                                    "frame": currentKeyInfo.newFrame,
+                                    "inHandle": false,
+                                    "outHandle": true,
+                                    "xValue": currentKeyInfo.newFrame + (outBez.x * timeScale),
+                                    "yValue": currentKeyInfo.keyData.numValue + outBez.y,
+                                    "angleLocked": !!currentKeyInfo.keyData.locked,
+                                    "weightLocked": !!currentKeyInfo.keyData.weightLocked
+                                };
+                                api.modifyKeyframeTangent(layerId, outTangent);
                             } catch (e) {
-                                // Error processing bezier pair
+                                // Handle modification can fail on locked or expression-driven keys
+                            }
+                        }
+
+                        // Incoming handle of the next keyframe
+                        if (nextKeyInfo.keyData && nextKeyInfo.keyData.interpolation === 0 &&
+                            nextKeyInfo.keyData.leftBez) {
+                            try {
+                                var inBez = nextKeyInfo.keyData.leftBez;
+                                var inTangent = {};
+                                inTangent[attrId] = {
+                                    "frame": nextKeyInfo.newFrame,
+                                    "inHandle": true,
+                                    "outHandle": false,
+                                    "xValue": nextKeyInfo.newFrame + (inBez.x * timeScale),
+                                    "yValue": nextKeyInfo.keyData.numValue + inBez.y,
+                                    "angleLocked": !!nextKeyInfo.keyData.locked,
+                                    "weightLocked": !!nextKeyInfo.keyData.weightLocked
+                                };
+                                api.modifyKeyframeTangent(layerId, inTangent);
+                            } catch (e) {
+                                // Handle modification can fail on locked or expression-driven keys
                             }
                         }
                     }
-                    
+
                 } catch (e) {
                     // Error processing attribute
                 }
@@ -504,136 +507,114 @@ function convertFrameRate(targetFps) {
             processedLayers++;
         }
         
-        // Convert Auto Animate timeOffset and Frame behavior properties
-        // These need special handling as they affect timing but aren't keyframed attributes
-        console.log("=== Checking for Auto Animate and Frame behaviors ===");
+        // Convert static (un-keyframed) attributes that are measured in frames.
+        // Keyframed versions of these were already retimed by the pass above, so each
+        // one is skipped when it has keyframes.
+        console.log("=== Converting frame-based Attributes ===");
         for (var i = 0; i < allLayers.length; i++) {
             var layerId = allLayers[i];
-            
             if (!api.layerExists(layerId)) {
                 continue;
             }
-            
+
+            var layerType;
             try {
-                var layerType = api.getType(layerId);
-                
-                // Debug: log all layer types to see what we're dealing with
-                if (layerType === "autoAnimate" || layerType === "frame") {
-                    console.log("Found " + layerType + " layer: " + layerId);
+                layerType = api.getLayerType(layerId);
+            } catch (e) {
+                continue;
+            }
+
+            var frameAttrs = FRAME_ATTRIBUTES[layerType];
+            if (frameAttrs) {
+                for (var f = 0; f < frameAttrs.length; f++) {
+                    scaleFrameAttribute(layerId, frameAttrs[f], ratio);
                 }
-                
-                // Handle Auto Animate deformer timeOffset
-                if (layerType === "autoAnimate") {
-                    console.log("Processing Auto Animate layer: " + layerId);
-                    try {
-                        // Check if timeOffset is animated (has keyframes)
-                        var timeOffsetKeyframes = api.getKeyframeTimes(layerId, "timeOffset");
-                        var isTimeOffsetAnimated = timeOffsetKeyframes && timeOffsetKeyframes.length > 0;
-                        
-                        // Only adjust if not animated (keyframes already handled)
-                        if (!isTimeOffsetAnimated) {
-                            var currentTimeOffset = api.get(layerId, "timeOffset");
-                            var newTimeOffset = currentTimeOffset * ratio;
-                            api.set(layerId, {"timeOffset": newTimeOffset});
-                            console.log("  - Adjusted timeOffset: " + currentTimeOffset + " → " + newTimeOffset);
-                        } else {
-                            console.log("  - Skipped timeOffset (animated)");
-                        }
-                    } catch (e) {
-                        console.log("  - Error adjusting timeOffset: " + e.message);
+            }
+
+            // Image Shader: where footage sits in time, and how fast it plays.
+            //
+            // The shader resolves a footage frame from the Composition's Time plus its own
+            // Time Offset, so that offset is in Composition frames and has to scale with them.
+            // Leaving it behind is what makes footage drift out of sync while everything
+            // around it retimes correctly.
+            //
+            // Time Offset ignores api.set - it's a read-back of the layer's position in time,
+            // moved with api.offsetLayerTime(). That call also slides the host layer's in/out
+            // points, which is why they're restored from inOutPlan at the end of the conversion.
+            //
+            // The playback rate needs no work when Use Footage FPS is on (the default in
+            // current Cavalry) - the footage runs at its native rate whatever the Composition
+            // does. With it off, FPS is connected to the Composition's Frame Rate, so changing
+            // the Composition drags footage speed with it and the shot plays slow or fast.
+            // Break that connection and pin FPS to the rate it was playing at beforehand.
+            if (layerType === "imageShader") {
+                try {
+                    var timeOffset = api.get(layerId, "timeOffset");
+                    var offsetDelta = Math.round(timeOffset * ratio) - timeOffset;
+                    if (offsetDelta !== 0) {
+                        api.offsetLayerTime(layerId, offsetDelta);
+                        console.log("  - " + layerId + " footage offset: " + timeOffset + " → " + Math.round(timeOffset * ratio));
                     }
+
+                    if (!api.get(layerId, "useFootageFps") &&
+                        api.getInConnection(layerId, "fps") === activeComp + ".fps") {
+                        api.disconnectInput(layerId, "fps");
+                        api.set(layerId, {"fps": currentFps});
+                        console.log("  - " + layerId + " FPS pinned to " + currentFps + " (was following the Composition)");
+                    }
+                } catch (e) {
+                    console.log("  - Error retiming Image Shader " + layerId + ": " + e.message);
                 }
-                
-                // Handle Frame behavior properties
-                if (layerType === "frame") {
-                    console.log("Processing Frame behavior: " + layerId);
-                    try {
-                        // Check interpolation mode - only process if mode is "Frame" (enum value 0 or not present)
-                        // mode = 0: Frame (frame-based, needs conversion)
-                        // mode = 1: Seconds (time-based, no conversion needed)
-                        var interpMode;
-                        try {
-                            interpMode = api.get(layerId, "mode");
-                        } catch (e) {
-                            interpMode = 0; // Default to Frame mode if not present
-                        }
-                        
-                        console.log("  - Interpolation mode: " + (interpMode === 0 ? "Frame" : "Seconds"));
-                        
-                        if (interpMode === 0) { // Frame mode
-                            // Check which attributes are animated
-                            var valueKeyframes = api.getKeyframeTimes(layerId, "value");
-                            var offsetKeyframes = api.getKeyframeTimes(layerId, "offset");
-                            var startFrameKeyframes = api.getKeyframeTimes(layerId, "startFrame");
-                            
-                            var isValueAnimated = valueKeyframes && valueKeyframes.length > 0;
-                            var isOffsetAnimated = offsetKeyframes && offsetKeyframes.length > 0;
-                            var isStartFrameAnimated = startFrameKeyframes && startFrameKeyframes.length > 0;
-                            
-                            // Adjust value (divide by ratio to maintain visual speed)
-                            if (!isValueAnimated) {
-                                try {
-                                    var currentValue = api.get(layerId, "value");
-                                    var newValue = currentValue / ratio;
-                                    api.set(layerId, {"value": newValue});
-                                    console.log("  - Adjusted value: " + currentValue + " → " + newValue);
-                                } catch (e) {
-                                    console.log("  - Error adjusting value: " + e.message);
-                                }
-                            } else {
-                                console.log("  - Skipped value (animated)");
-                            }
-                            
-                            // Adjust offset (multiply by ratio)
-                            if (!isOffsetAnimated) {
-                                try {
-                                    var currentOffset = api.get(layerId, "offset");
-                                    var newOffset = currentOffset * ratio;
-                                    api.set(layerId, {"offset": newOffset});
-                                    console.log("  - Adjusted offset: " + currentOffset + " → " + newOffset);
-                                } catch (e) {
-                                    console.log("  - Error adjusting offset: " + e.message);
-                                }
-                            } else {
-                                console.log("  - Skipped offset (animated)");
-                            }
-                            
-                            // Adjust startFrame (multiply by ratio)
-                            if (!isStartFrameAnimated) {
-                                try {
-                                    var currentStartFrame = api.get(layerId, "startFrame");
-                                    var newStartFrame = Math.round(currentStartFrame * ratio);
-                                    api.set(layerId, {"startFrame": newStartFrame});
-                                    console.log("  - Adjusted startFrame: " + currentStartFrame + " → " + newStartFrame);
-                                } catch (e) {
-                                    console.log("  - Error adjusting startFrame: " + e.message);
-                                }
-                            } else {
-                                console.log("  - Skipped startFrame (animated)");
-                            }
-                        } else {
-                            console.log("  - Skipped (mode is Seconds, not Frame)");
-                        }
-                    } catch (e) {
-                        console.log("  - Error processing Frame behavior: " + e.message);
+            }
+
+            // Frame behaviour: only frame-based mode needs converting (mode 1 is Seconds).
+            // `value` is a per-frame increment so it scales inversely; the rest are frame counts.
+            if (layerType === "frame") {
+                try {
+                    var interpMode = api.get(layerId, "mode");
+                    if (interpMode === 0) {
+                        scaleFrameAttribute(layerId, "value", 1 / ratio);
+                        scaleFrameAttribute(layerId, "offset", ratio);
+                        scaleFrameAttribute(layerId, "startFrame", ratio);
+                        scaleFrameAttribute(layerId, "cycleLength", ratio);
                     }
+                } catch (e) {
+                    console.log("  - Error processing Frame behaviour " + layerId + ": " + e.message);
+                }
+            }
+
+            // Oscillator: frequency is a rate in seconds/BPM either way, so it never scales.
+            // Its timeOffset is in frames and is covered by FRAME_ATTRIBUTES.
+        }
+
+        // Write the layer in/out points recorded at the start. Doing it last means the slide
+        // caused by offsetting footage time gets overwritten with the correct values, and
+        // host/child layers that share one set of points simply agree on the same target.
+        for (var i = 0; i < inOutPlan.length; i++) {
+            var plan = inOutPlan[i];
+            try {
+                var newInFrame = Math.round(plan.inFrame * ratio);
+
+                // api.getOutFrame() reports the frame after the last one the layer covers,
+                // but api.setOutFrame() takes the last covered frame - so writing back what
+                // was read makes every trimmed layer one frame longer, every conversion.
+                var newOutFrame = Math.round(plan.outFrame * ratio) - 1;
+
+                // Order matters: an in point can never be set past the current out point
+                // (and vice versa), so move the one that leads the way first. Getting this
+                // backwards silently leaves the in point at its old value.
+                if (ratio > 1) {
+                    api.setOutFrame(plan.layerId, newOutFrame);
+                    api.setInFrame(plan.layerId, newInFrame);
+                } else {
+                    api.setInFrame(plan.layerId, newInFrame);
+                    api.setOutFrame(plan.layerId, newOutFrame);
                 }
             } catch (e) {
-                // Could not get layer type - this is normal for most layers
+                // In/out points can be locked or driven, in which case there's nothing to do
             }
         }
-        
-        // Get current ranges BEFORE updating frame rate
-        var currentStartFrame, currentEndFrame, currentPlaybackStart, currentPlaybackEnd;
-        try {
-            currentStartFrame = api.get(activeComp, "startFrame");
-            currentEndFrame = api.get(activeComp, "endFrame");
-            currentPlaybackStart = api.get(activeComp, "playbackStart");
-            currentPlaybackEnd = api.get(activeComp, "playbackEnd");
-        } catch(e) {
-            // Error reading current ranges
-        }
-        
+
         // Update the composition frame rate
         try {
             api.set(activeComp, {"fps": targetFps});
