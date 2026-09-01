@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.0] - 2026-08-31
+
+### Added
+- Disconnect Inputs/Outputs: disconnect all inputs and or outputs on a layer
+- Precompose Selected: Keep Timing and Crop to Content
+
+### Updated
+- Comp Breadcrumb: fixed an issue where creating a precomp would trigger a function to open all comps in the scene
+
+
 
 ## [1.2.2] - 2026-04-04
 
