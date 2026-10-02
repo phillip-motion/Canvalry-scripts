@@ -1,6 +1,10 @@
 // Renamer Script for Cavalry
 // Add, Replace, or Number assets or layers
 
+import { tokens, span, richLabel, label, status, button, field, formRow, checkRow, tabStrip, list, panel } from "./lib/ui-kit.js";
+
+var T = tokens();
+
 // Set window title
 ui.setTitle("Renamer");
 
@@ -13,7 +17,7 @@ prependInput.setPlaceholder("Prepend text...");
 var appendInput = new ui.LineEdit();
 appendInput.setPlaceholder("Append text...");
 
-var applyAddButton = new ui.Button("Apply");
+var applyAddButton = button("Apply", true, T);
 
 // =============================================================================
 // REPLACE TAB CONTROLS (Original functionality)
@@ -24,7 +28,7 @@ findInput.setPlaceholder("Text to find...");
 var replaceInput = new ui.LineEdit();
 replaceInput.setPlaceholder("Replacement text...");
 
-var applyReplaceButton = new ui.Button("Apply");
+var applyReplaceButton = button("Apply", true, T);
 
 // =============================================================================
 // NUMBER TAB CONTROLS
@@ -39,50 +43,22 @@ positionDropdown.addEntry("Prepend");
 
 var reverseCheckbox = new ui.Checkbox(false);
 
-var applyNumberButton = new ui.Button("Apply");
+var applyNumberButton = button("Apply", true, T);
 
 // =============================================================================
 // SHARED COMPONENTS
 // =============================================================================
 
-// Create ScrollView for the table (we'll recreate the table container each update)
-var previewScrollView = new ui.ScrollView();
-previewScrollView.setFixedHeight(200);
+var preview = list(200, T);
 
-// These will be recreated on each update
-var originalNamesColumn;
-var arrowsColumn;
-var newNamesColumn;
-var tableContainer;
-
-var statusLabel = new ui.Label("");
-statusLabel.setTextColor(ui.getThemeColor("Accent1"));
+var statusLabel = status("", T);
 
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
 
-// Clear and recreate the preview table
 function clearPreviewTable() {
-    // Recreate all column layouts from scratch
-    originalNamesColumn = new ui.VLayout();
-    originalNamesColumn.setSpaceBetween(2);
-    
-    arrowsColumn = new ui.VLayout();
-    arrowsColumn.setSpaceBetween(2);
-    
-    newNamesColumn = new ui.VLayout();
-    newNamesColumn.setSpaceBetween(2);
-    
-    // Recreate table container
-    tableContainer = new ui.HLayout();
-    tableContainer.setSpaceBetween(0);
-    tableContainer.add(originalNamesColumn);
-    tableContainer.add(arrowsColumn);
-    tableContainer.add(newNamesColumn);
-    
-    // Update ScrollView with new container
-    previewScrollView.setLayout(tableContainer);
+    preview.layout.clear();
 }
 
 // Detect padding from start number string (1 = no padding, 01 = 2 digits, 001 = 3 digits)
@@ -108,7 +84,7 @@ function padNumber(num, padding) {
 // =============================================================================
 function updatePreview() {
     var selectedAssets = api.getSelection();
-    var currentTab = tabView.currentTab();
+    var currentTab = tabs.current();
     
     // Clear the preview table
     clearPreviewTable();
@@ -116,7 +92,7 @@ function updatePreview() {
     // Update preview title based on selection
     if (selectedAssets.length === 0) {
         previewTitleLabel.setText("Select items and change settings to preview");
-        previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
+        previewTitleLabel.setTextColor(T.muted);
         return;
     }
     
@@ -130,7 +106,7 @@ function updatePreview() {
         
         if (prependText === "" && appendText === "") {
             previewTitleLabel.setText("Enter text in Prepend and/or Append fields to see preview.");
-            previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
+            previewTitleLabel.setTextColor(T.muted);
             return;
         }
         
@@ -148,11 +124,11 @@ function updatePreview() {
         if (changesCount === 0) {
             var countText = selectedAssets.length + " asset" + (selectedAssets.length > 1 ? "s" : "") + " selected - No changes to apply";
             previewTitleLabel.setText(countText);
-            previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
+            previewTitleLabel.setTextColor(T.muted);
         } else {
             var countText = selectedAssets.length + " asset" + (selectedAssets.length > 1 ? "s" : "") + " selected - " + changesCount + " will be modified";
             previewTitleLabel.setText(countText);
-            previewTitleLabel.setTextColor("#ffffff");
+            previewTitleLabel.setTextColor(T.text);
         }
     }
     
@@ -163,7 +139,7 @@ function updatePreview() {
         
         if (findText === "") {
             previewTitleLabel.setText("Enter text in the 'Find' field to see preview.");
-            previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
+            previewTitleLabel.setTextColor(T.muted);
             return;
         }
         
@@ -181,11 +157,11 @@ function updatePreview() {
         if (changesCount === 0) {
             var countText = selectedAssets.length + " asset" + (selectedAssets.length > 1 ? "s" : "") + " selected - No matches found";
             previewTitleLabel.setText(countText);
-            previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
+            previewTitleLabel.setTextColor(T.muted);
         } else {
             var countText = selectedAssets.length + " asset" + (selectedAssets.length > 1 ? "s" : "") + " selected - " + changesCount + " match(es) found";
             previewTitleLabel.setText(countText);
-            previewTitleLabel.setTextColor("#ffffff");
+            previewTitleLabel.setTextColor(T.text);
         }
     }
     
@@ -197,7 +173,7 @@ function updatePreview() {
         var startNum = parseInt(startStr);
         if (isNaN(startNum)) {
             previewTitleLabel.setText("Please enter a valid number.");
-            previewTitleLabel.setTextColor("#ff6666");
+            previewTitleLabel.setTextColor(T.error);
             return;
         }
         
@@ -230,29 +206,21 @@ function updatePreview() {
         if (changesCount > 0) {
             var countText = selectedAssets.length + " asset" + (selectedAssets.length > 1 ? "s" : "") + " selected - " + changesCount + " will be numbered";
             previewTitleLabel.setText(countText);
-            previewTitleLabel.setTextColor("#ffffff");
+            previewTitleLabel.setTextColor(T.text);
         }
     }
     
-    // Populate the table with changes
+    // One rich-text line per rename: old name, muted arrow, new name in the accent
     for (var i = 0; i < changesList.length; i++) {
-        // Original name label
-        var oldNameLabel = new ui.Label(changesList[i].oldName);
-        oldNameLabel.setTextColor(ui.getThemeColor("Text"));
-        originalNamesColumn.add(oldNameLabel);
-        
-        // Arrow label
-        var arrowLabel = new ui.Label("→");
-        arrowLabel.setTextColor(ui.getThemeColor("Midlight"));
-        arrowLabel.setAlignment(1); // Center alignment
-        arrowLabel.setFixedWidth(12);
-        arrowsColumn.add(arrowLabel);
-        
-        // New name label
-        var newNameLabel = new ui.Label(changesList[i].newName);
-        newNameLabel.setTextColor(ui.getThemeColor("Accent1"));
-        newNamesColumn.add(newNameLabel);
+        var line = richLabel(
+            span(changesList[i].oldName, { color: T.text }) +
+            span("  →  ", { color: T.muted }) +
+            span(changesList[i].newName, { color: T.accent })
+        );
+        line.setFontSize(12);
+        preview.layout.add(line);
     }
+    preview.layout.addStretch();
 }
 
 // =============================================================================
@@ -267,14 +235,14 @@ function applyAddText() {
     
     if (selectedAssets.length === 0) {
         statusLabel.setText("❌ No assets selected!");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         console.warn("No items selected. Please select one or more items in the Assets panel.");
         return;
     }
     
     if (prependText === "" && appendText === "") {
         statusLabel.setText("❌ Enter text to prepend and/or append!");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         console.warn("Please enter text in the Prepend and/or Append fields.");
         return;
     }
@@ -298,7 +266,7 @@ function applyAddText() {
     }
     
     statusLabel.setText("✓ Renamed " + renamedCount + " asset(s)");
-    statusLabel.setTextColor(ui.getThemeColor("Accent1"));
+    statusLabel.setTextColor(T.accent);
     console.log("Add complete! Changed " + renamedCount + " asset name(s).");
     
     updatePreview();
@@ -312,14 +280,14 @@ function applyRename() {
     
     if (selectedAssets.length === 0) {
         statusLabel.setText("❌ No assets selected!");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         console.warn("No items selected. Please select one or more items in the Assets panel.");
         return;
     }
     
     if (findText === "") {
         statusLabel.setText("❌ 'Find' field is empty!");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         console.warn("Please enter text in the 'Find' field.");
         return;
     }
@@ -343,7 +311,7 @@ function applyRename() {
     }
     
     statusLabel.setText("✓ Renamed " + renamedCount + " asset(s)");
-    statusLabel.setTextColor(ui.getThemeColor("Accent1"));
+    statusLabel.setTextColor(T.accent);
     console.log("Replace complete! Changed " + renamedCount + " asset name(s).");
     
     updatePreview();
@@ -357,7 +325,7 @@ function applyNumbering() {
     
     if (selectedAssets.length === 0) {
         statusLabel.setText("❌ No assets selected!");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         console.warn("No items selected. Please select one or more items in the Assets panel.");
         return;
     }
@@ -365,7 +333,7 @@ function applyNumbering() {
     var startNum = parseInt(startStr);
     if (isNaN(startNum)) {
         statusLabel.setText("❌ Invalid start number!");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         console.warn("Please enter a valid number in the 'Start numbering from' field.");
         return;
     }
@@ -404,7 +372,7 @@ function applyNumbering() {
     }
     
     statusLabel.setText("✓ Numbered " + renamedCount + " asset(s)");
-    statusLabel.setTextColor(ui.getThemeColor("Accent1"));
+    statusLabel.setTextColor(T.accent);
     console.log("Numbering complete! Changed " + renamedCount + " asset name(s).");
     
     updatePreview();
@@ -414,108 +382,55 @@ function applyNumbering() {
 // TAB LAYOUTS
 // =============================================================================
 
-// ADD TAB LAYOUT
-var layoutMargin = 2;
-var layoutSpaceBetween = 4;
+function page(rows, applyButton) {
+    var layout = new ui.VLayout();
+    layout.setMargins(0, 0, 0, 0);
+    layout.setSpaceBetween(6);
+    rows.forEach(function (r) { layout.add(r); });
+    layout.add(applyButton);
+    var host = new ui.Container();
+    host.setLayout(layout);
+    return host;
+}
 
-var addTabLayout = new ui.VLayout();
-addTabLayout.setMargins(layoutMargin,layoutMargin,layoutMargin,layoutMargin);
-addTabLayout.setSpaceBetween(layoutSpaceBetween);
+var addPage = page([
+    formRow("Prepend", field(prependInput, T), T),
+    formRow("Append", field(appendInput, T), T)
+], applyAddButton);
 
-var prependLabel = new ui.Label("Prepend");
-prependLabel.setTextColor(ui.getThemeColor("Light"));
-prependLabel.setMinimumWidth(55);
-var prependLayout = new ui.HLayout();
-prependLayout.add(prependLabel);
-prependLayout.add(prependInput);
-addTabLayout.add(prependLayout);
+var replacePage = page([
+    formRow("Find", field(findInput, T), T),
+    formRow("Replace", field(replaceInput, T), T)
+], applyReplaceButton);
 
-var appendLabel = new ui.Label("Append");
-appendLabel.setTextColor(ui.getThemeColor("Light"));
-appendLabel.setMinimumWidth(55);
-var appendLayout = new ui.HLayout();
-appendLayout.add(appendLabel);
-appendLayout.add(appendInput);
-addTabLayout.add(appendLayout);
+var positionRow = new ui.HLayout();
+positionRow.setSpaceBetween(8);
+positionDropdown.setMinimumWidth(90);
+positionRow.add(positionDropdown);
+positionRow.add(checkRow(reverseCheckbox, "Reverse order", T));
 
-addTabLayout.addStretch();
-
-addTabLayout.add(applyAddButton);
-
-// REPLACE TAB LAYOUT
-var replaceTabLayout = new ui.VLayout();
-replaceTabLayout.setMargins(layoutMargin,layoutMargin,layoutMargin,layoutMargin);
-replaceTabLayout.setSpaceBetween(layoutSpaceBetween);
-
-var findLabel = new ui.Label("Find");
-findLabel.setTextColor(ui.getThemeColor("Light"));
-findLabel.setMinimumWidth(55);
-var findLayout = new ui.HLayout();
-findLayout.add(findLabel);
-findLayout.add(findInput);
-replaceTabLayout.add(findLayout);
-
-
-var replaceLabel = new ui.Label("Replace");
-replaceLabel.setMinimumWidth(55);
-replaceLabel.setTextColor(ui.getThemeColor("Light"));
-var replaceLayout = new ui.HLayout();
-replaceLayout.add(replaceLabel);
-replaceLayout.add(replaceInput);
-replaceTabLayout.add(replaceLayout);
-replaceTabLayout.addStretch();
-replaceTabLayout.add(applyReplaceButton);
-
-// NUMBER TAB LAYOUT
-var numberTabLayout = new ui.VLayout();
-numberTabLayout.setMargins(layoutMargin,layoutMargin,layoutMargin,layoutMargin);
-numberTabLayout.setSpaceBetween(layoutSpaceBetween);
-
-var startNumberLabel = new ui.Label("Number from");
-startNumberLabel.setTextColor(ui.getThemeColor("Light"));
-var numberFromLayout = new ui.HLayout();
-numberFromLayout.add(startNumberLabel);
-numberFromLayout.add(startNumberInput);
-numberTabLayout.add(numberFromLayout);
-
-var reverseLabel = new ui.Label("Reverse order");
-reverseLabel.setTextColor(ui.getThemeColor("Light"));
-var reverseRow = new ui.HLayout();
-reverseRow.add(positionDropdown);
-reverseRow.add(reverseCheckbox);
-reverseRow.add(reverseLabel);
-numberTabLayout.add(reverseRow);
-numberTabLayout.addStretch();
-numberTabLayout.add(applyNumberButton);
+var numberPage = page([
+    formRow("Number from", field(startNumberInput, T), T, 80),
+    formRow("Position", positionRow, T, 80)
+], applyNumberButton);
 
 // =============================================================================
-// MAIN LAYOUT WITH TABVIEW
+// MAIN LAYOUT
 // =============================================================================
+var tabs = tabStrip(["Add", "Replace", "Number"], [addPage, replacePage, numberPage], T, function () {
+    updatePreview();
+});
 
-// Create TabView
-var tabView = new ui.TabView();
-tabView.add("Add", addTabLayout);
-tabView.add("Replace", replaceTabLayout);
-tabView.add("Number", numberTabLayout);
+var mainLayout = panel();
+mainLayout.add(tabs.widget);
+mainLayout.add(addPage);
+mainLayout.add(replacePage);
+mainLayout.add(numberPage);
 
-// Create main layout
-var mainLayout = new ui.VLayout();
-mainLayout.setMargins(0, 0, 0, 0);
-mainLayout.setSpaceBetween(layoutSpaceBetween);
-
-// Add TabView
-mainLayout.add(tabView);
-
-// Add shared preview section
-var previewTitleLabel = new ui.Label("Select items and change settings to preview");
-previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
+var previewTitleLabel = label("Select items and change settings to preview", 11, T.muted);
 mainLayout.add(previewTitleLabel);
-mainLayout.add(previewScrollView);
-
-// Add shared status
-mainLayout.addSpacing(4);
+mainLayout.add(preview.widget);
 mainLayout.add(statusLabel);
-
 mainLayout.addStretch();
 
 // =============================================================================
@@ -543,7 +458,6 @@ applyNumberButton.onClick = function() { applyNumbering(); };
 // =============================================================================
 
 ui.add(mainLayout);
-ui.setBackgroundColor(ui.getThemeColor("Base"));
 ui.setMinimumWidth(300);
 ui.setMinimumHeight(350);
 

@@ -1,3 +1,5 @@
+import { tokens } from "./lib/ui-kit.js";
+
 // Comp Breadcrumb Toolbar for Cavalry
 // Dockable toolbar showing parent composition hierarchy with click-to-navigate
 
@@ -261,10 +263,12 @@ function handleCompChanged() {
 // Theme
 // ---------------------------------------------------------------------------
 
-var accentColor = ui.getThemeColor("Accent1");
-var textColor = ui.getThemeColor("Text");
-var midColor = ui.getThemeColor("Midlight");
-var baseColor = ui.getThemeColor("Base");
+var T = tokens();
+var accentColor = T.accent;
+var textColor = T.text;
+var midColor = T.muted;
+// The active segment sits sunk into the toolbar, like a selected tab
+var baseColor = T.surface;
 
 // ---------------------------------------------------------------------------
 // Breadcrumb rendering
@@ -284,7 +288,7 @@ function renderBreadcrumb() {
     for (var i = 0; i < navPath.length; i++) {
         if (i > 0) {
             var sep = new ui.Label("  >  ");
-            sep.setTextColor(textColor);
+            sep.setTextColor(midColor);
             breadcrumbLayout.add(sep);
         }
 

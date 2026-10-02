@@ -1,3 +1,5 @@
+import { tokens, status, button, field, panel } from "./lib/ui-kit.js";
+
 // Set the window title
 ui.setTitle("CSS Gradient to Cavalry Converter");
 
@@ -125,19 +127,22 @@ checkForUpdate(GITHUB_REPO, scriptName, currentVersion);
 
 // End update checker
 
+var T = tokens();
+
 // Create the gradient input text area
 var gradientInput = new ui.MultiLineEdit();
 gradientInput.setPlaceholder("Paste CSS here with linear-gradient properties...");
 
 // Create the apply button
-var applyButton = new ui.Button("Apply Gradient");
+var applyButton = button("Apply Gradient", true, T);
+var statusLabel = status("", T);
 
 // Set the button callback
 applyButton.onClick = function() {
     var cssGradient = gradientInput.getText();
     
     if (cssGradient.trim() === "") {
-        console.log("Please enter a CSS gradient");
+        statusLabel.set("Paste a CSS gradient first.", "warn");
         return;
     }
     
@@ -146,15 +151,20 @@ applyButton.onClick = function() {
     
     if (gradientDataArray && gradientDataArray.length > 0) {
         createCavalryGradients(gradientDataArray);
+        statusLabel.set("Created " + gradientDataArray.length + " gradient" + (gradientDataArray.length > 1 ? "s" : "") + ".", "ok");
     } else {
-        console.log("Error: Could not find any valid gradients. Please check the format.");
+        statusLabel.set("No valid gradients found. Check the format.", "error");
     }
 };
 
 // Add widgets to the layout
-ui.add(gradientInput);
-ui.addSpacing(10);
-ui.add(applyButton);
+var mainLayout = panel();
+var inputBox = field(gradientInput, T, 0);
+inputBox.setMinimumHeight(120);
+mainLayout.add(inputBox);
+mainLayout.add(applyButton);
+mainLayout.add(statusLabel);
+ui.add(mainLayout);
 
 // Show the window
 ui.show();

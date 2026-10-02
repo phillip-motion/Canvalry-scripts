@@ -1,3 +1,5 @@
+import { tokens, status, button, panel } from "./lib/ui-kit.js";
+
 // Lottie Importer for Cavalry
 // Imports Lottie JSON animations as native Cavalry layers.
 // Supports: Shape (ty=4), Solid (ty=1), Image (ty=2), Text (ty=5), Null (ty=3),
@@ -85,8 +87,9 @@ function checkForUpdate(githubRepo, scriptName, currentVersion, callback) {
 
 ui.setTitle("Lottie Importer");
 
-var statusLabel = new ui.Label("Choose a Lottie JSON file to import.");
-var importButton = new ui.Button("Import Lottie…");
+var T = tokens();
+var statusLabel = status("Choose a Lottie JSON file to import.", T);
+var importButton = button("Import Lottie…", true, T);
 
 importButton.onClick = function() {
     var startPath = api.getProjectPath() || api.getDesktopFolder();
@@ -125,18 +128,20 @@ importButton.onClick = function() {
     statusLabel.setText("Importing…");
     try {
         var count = importLottie(lottie);
-        statusLabel.setText("Imported " + count + " shape layer(s).");
+        statusLabel.set("Imported " + count + " shape layer(s).", "ok");
     } catch (e) {
         var errMsg = (e && e.message) ? e.message : String(e);
         if (e && e.stack) console.log("Lottie import stack: " + e.stack);
         console.log("Lottie import error: " + errMsg);
-        statusLabel.setText("Error: " + errMsg);
+        statusLabel.set("Error: " + errMsg, "error");
     }
 };
 
-ui.add(statusLabel);
-ui.addSpacing(10);
-ui.add(importButton);
+var mainLayout = panel();
+mainLayout.add(importButton);
+mainLayout.add(statusLabel);
+mainLayout.addStretch();
+ui.add(mainLayout);
 
 checkForUpdate(GITHUB_REPO, scriptName, currentVersion, function(updateAvailable, newVersion) {
     if (updateAvailable) {

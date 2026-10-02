@@ -1,3 +1,5 @@
+import { tokens, label, section, status, button, field, tabStrip, panel } from "./lib/ui-kit.js";
+
 // Cavalry Text Localizer Plugin
 // Exports all text strings from the project to JSON/CSV and reimports edited translations
 // Supports multi-language CSV import with composition duplication
@@ -592,9 +594,7 @@ function loadCSVFile() {
         }
         
         // Show the import controls
-        languageDropdown.setHidden(false);
-        applyLangButton.setHidden(false);
-        duplicateButton.setHidden(false);
+        csvLoaded.host.setHidden(false);
         statusLabel.setText("Found " + detectedLanguages.length + " language(s): " + detectedLanguages.join(", "));
         
         return true;
@@ -872,86 +872,80 @@ function applyTranslationToComp(newCompId, origCompId, origNodeId, translation) 
 // UI CREATION
 // ============================================
 
-// Create main layout
-var mainLayout = new ui.VLayout();
-mainLayout.setMargins(10, 10, 10, 10);
-mainLayout.setSpaceBetween(8);
+var T = tokens();
 
-// ---- JSON Section ----
-var jsonLabel = new ui.Label("JSON Export/Import");
-jsonLabel.setToolTip("Simple JSON format for direct text editing");
-mainLayout.add(jsonLabel);
+function page() {
+    var layout = new ui.VLayout();
+    layout.setMargins(0, 0, 0, 0);
+    layout.setSpaceBetween(6);
+    var host = new ui.Container();
+    host.setLayout(layout);
+    return { host: host, layout: layout };
+}
 
-// JSON button layout
-var jsonButtonLayout = new ui.HLayout();
-jsonButtonLayout.setSpaceBetween(6);
+function pair(a, b) {
+    var row = new ui.HLayout();
+    row.setSpaceBetween(6);
+    row.add(a);
+    row.add(b);
+    return row;
+}
 
-// Export JSON button
-var exportButton = new ui.Button("Export JSON");
-exportButton.setMinimumHeight(32);
+// ---- JSON tab ----
+var jsonPage = page();
+jsonPage.layout.add(label("Plain JSON for editing the text directly.", 11, T.muted));
+
+var exportButton = button("Export JSON…", false, T);
 exportButton.setToolTip("Export all text from all compositions to a JSON file");
 exportButton.onClick = function() {
     statusLabel.setText("Exporting JSON...");
     exportAllText();
 };
-jsonButtonLayout.add(exportButton);
 
-// Import JSON button
-var importButton = new ui.Button("Import JSON");
-importButton.setMinimumHeight(32);
+var importButton = button("Import JSON…", true, T);
 importButton.setToolTip("Import text from a JSON file and update all text in the project");
 importButton.onClick = function() {
     statusLabel.setText("Importing JSON...");
     importAllText();
 };
-jsonButtonLayout.add(importButton);
+jsonPage.layout.add(pair(exportButton, importButton));
 
-mainLayout.add(jsonButtonLayout);
+// ---- CSV tab ----
+var csvPage = page();
+csvPage.layout.add(label("One column per language, for translations.", 11, T.muted));
 
-
-
-// ---- CSV Section ----
-var csvLabel = new ui.Label("CSV Multi-Language Export/Import");
-csvLabel.setToolTip("CSV format supports multiple language columns");
-mainLayout.add(csvLabel);
-
-var csvButtonLayout = new ui.HLayout();
-csvButtonLayout.setSpaceBetween(6);
-
-
-// CSV Export button
-var csvExportButton = new ui.Button("Export CSV...");
-csvExportButton.setMinimumHeight(32);
+var csvExportButton = button("Export CSV…", false, T);
 csvExportButton.setToolTip("Export text as CSV with headers: compID, nodeID, originalValue\nAdd language columns (e.g. French, Spanish) and fill in translations");
 csvExportButton.onClick = function() {
     statusLabel.setText("Exporting CSV...");
     exportToCSV();
 };
-csvButtonLayout.add(csvExportButton);
 
-// CSV Import button (loads file and shows language selection)
-var csvImportButton = new ui.Button("Load CSV...");
-csvImportButton.setMinimumHeight(32);
+// Loads the file and shows the language controls below
+var csvImportButton = button("Load CSV…", true, T);
 csvImportButton.setToolTip("Load a CSV file with translations to select which language to import");
 csvImportButton.onClick = function() {
     statusLabel.setText("Loading CSV...");
     loadCSVFile();
 };
-csvButtonLayout.add(csvImportButton);
+csvPage.layout.add(pair(csvExportButton, csvImportButton));
 
-mainLayout.add(csvButtonLayout);
+// Shown once a CSV is loaded
+var csvLoaded = page();
+csvLoaded.layout.add(section("Language", T));
 
+var languageDropdown = new ui.DropDown();
+languageDropdown.setMinimumWidth(120);
 
-// CSV Import controls (initially hidden)
-var csvImportLayout = new ui.VLayout();
-csvImportLayout.setSpaceBetween(6);
+var applyLangButton = button("Apply", true, T);
+applyLangButton.setToolTip("Apply the selected language translations to the current project");
+applyLangButton.onClick = function() {
+    statusLabel.setText("Applying translations...");
+    applySelectedLanguage();
+};
+csvLoaded.layout.add(pair(languageDropdown, applyLangButton));
 
-// Language selection row
-var langSelectLayout = new ui.HLayout();
-langSelectLayout.setSpaceBetween(6);
-
-var duplicateButton = new ui.Button("Duplicate Comps for All Languages");
-duplicateButton.setMinimumHeight(36);
+var duplicateButton = button("Duplicate Comps for All Languages", false, T);
 duplicateButton.setToolTip("Load a CSV first, then click to create a copy of each composition for every language column.\nEach copy will have the language suffix appended and translations applied.");
 duplicateButton.onClick = function() {
     if (!csvImportData) {
@@ -961,45 +955,24 @@ duplicateButton.onClick = function() {
     statusLabel.setText("Duplicating compositions...");
     duplicateForAllLanguages();
 };
-mainLayout.add(duplicateButton);
+csvLoaded.layout.add(duplicateButton);
+csvLoaded.host.setHidden(true);
+csvPage.layout.add(csvLoaded.host);
 
+// ---- Panel ----
+var mainLayout = panel();
+var tabs = tabStrip(["JSON", "CSV"], [jsonPage.host, csvPage.host], T);
+mainLayout.add(tabs.widget);
+mainLayout.add(jsonPage.host);
+mainLayout.add(csvPage.host);
 
-var languageDropdown = new ui.DropDown();
-languageDropdown.setMinimumWidth(120);
-langSelectLayout.add(languageDropdown);
-
-// Apply button
-var applyLangButton = new ui.Button("Apply");
-applyLangButton.setMinimumHeight(28);
-applyLangButton.setToolTip("Apply the selected language translations to the current project");
-applyLangButton.onClick = function() {
-    statusLabel.setText("Applying translations...");
-    applySelectedLanguage();
-};
-langSelectLayout.add(applyLangButton);
-
-csvImportLayout.add(langSelectLayout);
-mainLayout.add(csvImportLayout);
-
-// Hide the CSV import controls initially
-duplicateButton.setHidden(true);
-languageDropdown.setHidden(true);
-applyLangButton.setHidden(true);
-
-
-// ---- Status ----
+var statusLabel = status("Ready", T);
+mainLayout.add(statusLabel);
 mainLayout.addStretch();
 
-// Status label
-var statusLabel = new ui.Label("Ready");
-statusLabel.setMinimumHeight(20);
-statusLabel.setAlignment(1); // Center align
-mainLayout.add(statusLabel);
-
-// Set the layout and show
 ui.add(mainLayout);
-ui.setMargins(0, 0, 0, 0);
 ui.setTitle("Localiser");
+ui.setMinimumWidth(280);
 ui.show();
 
 console.log("Text Localizer plugin loaded with CSV support");

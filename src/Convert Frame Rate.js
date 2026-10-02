@@ -11,12 +11,14 @@
 // 2. Easing - bezier handles scaled along the time axis only, per segment, so curves (and
 //    therefore motion paths) come out identical
 // 3. Footage and audio - Image Shader time offsets and Sound frame offsets
-// 4. Frame-based Attributes on behaviours, deformers and groups (see FRAME_ATTRIBUTES)
+// 4. Frame-based Attributes on behaviours, deformers and groups (see FRAME_ATTRIBUTES), and
+//    per-frame rates like Noise frequency (see PER_FRAME_RATE_ATTRIBUTES) - keyframed values included
 // 5. Layer in/out points, Composition frame range and playback range
+// 6. Pre-Comp time offsets
 //
-// Pre-Comps are left alone on purpose: Cavalry re-interpolates a Pre-Comp to its parent's
+// Pre-Comp contents are left alone on purpose: Cavalry re-interpolates a Pre-Comp to its parent's
 // frame rate (or preserves its own rate when Preserve Frame Rate is on), so their contents
-// stay in sync without being touched.
+// stay in sync without being touched. Only where the Pre-Comp starts is moved.
 //
 // KEY LEARNINGS ABOUT CAVALRY EASING:
 // 1. Use api.modifyKeyframeTangent() for reliable bezier handle modification
@@ -160,58 +162,109 @@ function main() {
     createUI();
 }
 
+// Panel styling: colours from Cavalry's theme (so light themes work), styled
+// ui.Buttons, and results in a status line rather than only the console.
+function theme() {
+    var pick = function (name, fallback) {
+        try { var c = ui.getThemeColor(name); return typeof c === "string" && c.charAt(0) === "#" ? c : fallback; } catch (e) { return fallback; }
+    };
+    var mix = function (a, b, t) {
+        var ch = function (h, i) { return parseInt(String(h).replace("#", "").substr(i * 2, 2), 16); }, out = "#";
+        for (var i = 0; i < 3; i++) { var v = Math.round(ch(a, i) + (ch(b, i) - ch(a, i)) * t); out += (v < 16 ? "0" : "") + v.toString(16); }
+        return out;
+    };
+    var bg = pick("Base", "#373737"), text = pick("Text", "#f1f1f1"), accent = pick("Accent1", "#3ddc84");
+    return {
+        primary: mix(bg, accent, 0.55),
+        muted: mix(text, bg, 0.45),
+        warn: "#e8a33d"
+    };
+}
+
+function label(text, size, color) {
+    var l = new ui.Label(text);
+    l.setFontSize(size || 12);
+    if (color) l.setTextColor(color);
+    l.setTransparentForMouseEvents(true);
+    return l;
+}
+
 // Create the UI with text input and Apply button
 function createUI() {
-    // Set the window title
+    var T = theme();
     ui.setTitle("Convert Frame Rate");
-    
-    // Add current FPS info label
-    
-    // Add spacing
-    // ui.addSpacing(10);
-    
-    // Add label for input
-    
-    // Add text input field
-    var hLayout1 = new ui.HLayout();
+
+    var root = new ui.VLayout();
+    root.setMargins(4, 4, 4, 4);
+    root.setSpaceBetween(8);
+
+    var row = new ui.HLayout();
+    row.setSpaceBetween(6);
     var fpsInput = new ui.LineEdit();
-    fpsInput.setPlaceholder("Enter new frame rate...");
-    hLayout1.add(fpsInput);
-    
-    
-    // Add Apply button
+    fpsInput.setPlaceholder("New frame rate…");
+    fpsInput.setFixedHeight(26);
+    row.add(fpsInput);
+
+    // A real ui.Button with onClick: long work from a Container's mouse handler has crashed Cavalry
     var applyButton = new ui.Button("Apply");
+    applyButton.setFontSize(12);
+    applyButton.setFixedHeight(26);
+    applyButton.setDrawStroke(false);
+    applyButton.setCornerRounding(4);
+    applyButton.setBackgroundColor(T.primary);
+    row.add(applyButton);
+    root.add(row);
+
+    var status = label("", 11, T.muted);
+    root.add(status);
+
+    var note = label("Expressions and JavaScript layers need checking by hand.", 10, T.muted);
+    root.add(note);
+    root.addStretch();
+
+    function showCurrent() {
+        var comp = api.getActiveComp();
+        status.setTextColor(T.muted);
+        status.setText(comp ? "Active composition: " + api.get(comp, "fps") + " fps" : "No active composition.");
+    }
+
+    function fail(message) {
+        status.setTextColor(T.warn);
+        status.setText(message);
+    }
 
     applyButton.onClick = function() {
         var newFpsString = fpsInput.getText().trim();
-        
-        // Validate input
-        if (!newFpsString || newFpsString === "") {
-            console.log("Please enter a frame rate value.");
-            return;
-        }
-        
         var newFps = parseFloat(newFpsString);
-        if (isNaN(newFps) || newFps <= 0 || newFps > 120) {
-            console.log("Error: Invalid frame rate. Please enter a number between 1 and 120.");
+        if (!newFpsString || isNaN(newFps) || newFps <= 0 || newFps > 120) {
+            fail("Enter a frame rate between 1 and 120.");
             return;
         }
-        
-        
-        // Proceed with conversion
-        convertFrameRate(newFps);
+
+        status.setText("Converting…");
+        var result;
+        ui.setCallbacksActive(false);  // no panel callbacks while the conversion runs
+        try {
+            result = convertFrameRate(newFps);
+        } catch (e) {
+            console.error("Convert Frame Rate: " + (e && e.stack || e));
+            result = "Failed: " + (e && e.message || e);
+        } finally {
+            ui.setCallbacksActive(true);
+        }
+
+        if (typeof result === "string") {
+            fail(result);
+            return;
+        }
+        status.setTextColor(result.checks ? T.warn : T.muted);
+        status.setText("Converted " + result.from + " → " + result.to + " fps · " + result.keys + " keyframes" +
+            (result.checks ? " · " + result.checks + " layers to check in the console" : ""));
     };
-    hLayout1.add(applyButton);
-    ui.add(hLayout1);
 
-    var instructions = new ui.Label("NOTE: Modifiers and procedural elements need manual adjustment.");
-    instructions.setTextColor(ui.getThemeColor("Light"));
-    ui.add(instructions);
-
-    ui.addStretch();
-
-    
-    // Show the UI
+    ui.add(root);
+    ui.setMinimumWidth(260);
+    showCurrent();
     ui.show();
 }
 
@@ -228,12 +281,91 @@ var FRAME_ATTRIBUTES = {
     "duplicator":      ["shapeTimeOffset"],
     "schedulingGroup": ["startFrame", "endFrame", "childOffset", "overlap"],
     "oscillator":      ["timeOffset"],
-    "noise":           ["generator.loopLength"]
+    "noise":           ["generator.loopLength"],
+    "subMesh":         ["shapeTimeOffset"]
 };
 
+// Frame-based Attributes that can sit on any layer type
+var ANY_LAYER_FRAME_ATTRIBUTES = ["posterizeTimeOffset", "layoutFrame"];
+
+// Rates counted per frame - these scale inversely, so the motion keeps its speed in seconds.
+// Noise frequency is per frame: double the frame rate without this and every Noise runs twice as fast.
+var PER_FRAME_RATE_ATTRIBUTES = {
+    "noise": ["generator.frequency"]
+};
+
+function contains(list, item) {
+    return !!list && list.indexOf(item) !== -1;
+}
+
+// How much an Attribute's *value* scales with the frame rate: ratio for frame counts,
+// 1 / ratio for per-frame rates, 1 for everything else. Used for keyframed values -
+// moving the keys only changes when they happen, not a value that is itself in frames.
+function valueScaleFor(layerId, layerType, attrId, ratio) {
+    if (contains(FRAME_ATTRIBUTES[layerType], attrId) || contains(ANY_LAYER_FRAME_ATTRIBUTES, attrId)) {
+        return ratio;
+    }
+    if (contains(PER_FRAME_RATE_ATTRIBUTES[layerType], attrId)) {
+        return 1 / ratio;
+    }
+    // Footage retimed by keyframing the Image Shader's Time: source time in Composition frames
+    if (layerType === "imageShader" && attrId === "time") {
+        return ratio;
+    }
+    if (layerType === "frame") {
+        try {
+            if (api.get(layerId, "mode") === 0) {
+                if (attrId === "value") return 1 / ratio;
+                if (contains(["offset", "startFrame", "cycleLength"], attrId)) return ratio;
+            }
+        } catch (e) {}
+    }
+    return 1;
+}
+
+// api.offsetLayerTime() also slides keyframes already on the layer (and its host), which the
+// keyframe pass has retimed by then. Note every key time first and put back any that moved.
+function offsetLayerTimeKeepKeys(layerId, frames) {
+    var layers = [layerId];
+    try {
+        var parent = api.getParent(layerId);
+        if (parent) layers.push(parent);
+    } catch (e) {}
+
+    var before = [];
+    for (var l = 0; l < layers.length; l++) {
+        try {
+            var attrs = api.getAnimatedAttributes(layers[l]);
+            for (var a = 0; a < attrs.length; a++) {
+                before.push({ layerId: layers[l], attrId: attrs[a], times: api.getKeyframeTimes(layers[l], attrs[a]) });
+            }
+        } catch (e) {}
+    }
+
+    api.offsetLayerTime(layerId, frames);
+
+    for (var b = 0; b < before.length; b++) {
+        var rec = before[b];
+        var after = api.getKeyframeTimes(rec.layerId, rec.attrId);
+        if (!after || after.length !== rec.times.length || after[0] === rec.times[0]) {
+            continue;
+        }
+        // Moving back by -frames: walk in the direction of travel so keys never land on each other
+        var order = [];
+        for (var k = 0; k < after.length; k++) order.push(k);
+        if (frames < 0) order.reverse();
+        for (var o = 0; o < order.length; o++) {
+            var move = {};
+            move[rec.attrId] = { "frame": after[order[o]], "newFrame": rec.times[order[o]] };
+            api.modifyKeyframe(rec.layerId, move);
+        }
+    }
+}
+
 // Scale one un-keyframed frame-based Attribute. Keyframed ones are left alone -
-// the keyframe pass has already moved them.
-function scaleFrameAttribute(layerId, attrId, scale) {
+// the keyframe pass has already retimed them, values included.
+// isRate: a per-frame rate - never rounded, since a frequency of 1 halved must stay 0.5.
+function scaleFrameAttribute(layerId, attrId, scale, isRate) {
     try {
         var keys = api.getKeyframeTimes(layerId, attrId);
         if (keys && keys.length > 0) {
@@ -245,7 +377,7 @@ function scaleFrameAttribute(layerId, attrId, scale) {
         }
         // Whole-frame Attributes stay whole; rates and increments keep their precision
         var scaled = value * scale;
-        if (value === Math.round(value)) {
+        if (!isRate && value === Math.round(value)) {
             scaled = Math.round(scaled);
         }
         var payload = {};
@@ -261,8 +393,7 @@ function scaleFrameAttribute(layerId, attrId, scale) {
 function convertFrameRate(targetFps) {
     activeComp = api.getActiveComp();
     if (!activeComp) {
-        console.log("Error: No active composition found");
-        return;
+        return "No active composition.";
     }
 
     try {
@@ -276,6 +407,7 @@ function convertFrameRate(targetFps) {
     }
 
     try {
+        var fromFps = currentFps;
         var ratio = targetFps / currentFps;
         
         // Store current playhead position to restore later
@@ -286,11 +418,12 @@ function convertFrameRate(targetFps) {
         try {
             allLayers = api.getCompLayers(false); // false = get all layers including children
         } catch(e) {
-            return;
+            return "Couldn't read the composition's layers.";
         }
         
         var processedLayers = 0;
         var totalKeyframes = 0;
+        var layersToCheck = 0;
 
         // Read the ranges before anything moves
         var currentStartFrame = api.get(activeComp, "startFrame");
@@ -348,10 +481,16 @@ function convertFrameRate(targetFps) {
                 continue;
             }
             
+            var keyLayerType = "";
+            try {
+                keyLayerType = api.getLayerType(layerId);
+            } catch (e) {}
+
             // Process each animated attribute
             for (var attrIdx = 0; attrIdx < animatedAttrs.length; attrIdx++) {
                 var attrId = animatedAttrs[attrIdx];
-                
+                var valueScale = valueScaleFor(layerId, keyLayerType, attrId, ratio);
+
                 try {
                     // Get keyframe times and IDs for this attribute
                     var keyframeTimes = api.getKeyframeTimes(layerId, attrId);
@@ -432,7 +571,20 @@ function convertFrameRate(targetFps) {
                         api.modifyKeyframe(layerId, modifyObj);
                         totalKeyframes++;
                     }
-                    
+
+                    // Values that are themselves in frames (or per frame) scale too. Keyframing an
+                    // existing frame overwrites its value; the handles are rewritten below.
+                    for (var keyIdx = 0; keyIdx < keyframeDataArray.length; keyIdx++) {
+                        var valueKey = keyframeDataArray[keyIdx];
+                        var hasValue = valueKey.keyData && typeof valueKey.keyData.numValue === "number";
+                        valueKey.newValue = hasValue ? valueKey.keyData.numValue * valueScale : undefined;
+                        if (valueScale !== 1 && hasValue) {
+                            var valueObj = {};
+                            valueObj[attrId] = valueKey.newValue;
+                            api.keyframe(layerId, valueKey.newFrame, valueObj);
+                        }
+                    }
+
                     // Preserve easing: scale bezier handles along the TIME axis only.
                     //
                     // A frame rate change is a pure scale of the time axis - keyframe values
@@ -467,7 +619,7 @@ function convertFrameRate(targetFps) {
                                     "inHandle": false,
                                     "outHandle": true,
                                     "xValue": currentKeyInfo.newFrame + (outBez.x * timeScale),
-                                    "yValue": currentKeyInfo.keyData.numValue + outBez.y,
+                                    "yValue": currentKeyInfo.newValue + outBez.y * valueScale,
                                     "angleLocked": !!currentKeyInfo.keyData.locked,
                                     "weightLocked": !!currentKeyInfo.keyData.weightLocked
                                 };
@@ -488,7 +640,7 @@ function convertFrameRate(targetFps) {
                                     "inHandle": true,
                                     "outHandle": false,
                                     "xValue": nextKeyInfo.newFrame + (inBez.x * timeScale),
-                                    "yValue": nextKeyInfo.keyData.numValue + inBez.y,
+                                    "yValue": nextKeyInfo.newValue + inBez.y * valueScale,
                                     "angleLocked": !!nextKeyInfo.keyData.locked,
                                     "weightLocked": !!nextKeyInfo.keyData.weightLocked
                                 };
@@ -524,10 +676,43 @@ function convertFrameRate(targetFps) {
                 continue;
             }
 
+            // JavaScript layers can do their own frame maths (time / 30 and so on), which can't be
+            // read reliably - list them so they can be checked by hand.
+            if (layerType.indexOf("javaScript") === 0) {
+                var jsName = layerId;
+                try { jsName = api.getNiceName(layerId); } catch (e) {}
+                layersToCheck++;
+                console.warn("  - Check " + jsName + " (" + layerType + "): any frame maths in its code isn't converted");
+            }
+
             var frameAttrs = FRAME_ATTRIBUTES[layerType];
             if (frameAttrs) {
                 for (var f = 0; f < frameAttrs.length; f++) {
                     scaleFrameAttribute(layerId, frameAttrs[f], ratio);
+                }
+            }
+            for (var f = 0; f < ANY_LAYER_FRAME_ATTRIBUTES.length; f++) {
+                scaleFrameAttribute(layerId, ANY_LAYER_FRAME_ATTRIBUTES[f], ratio);
+            }
+            var rateAttrs = PER_FRAME_RATE_ATTRIBUTES[layerType];
+            if (rateAttrs) {
+                for (var f = 0; f < rateAttrs.length; f++) {
+                    scaleFrameAttribute(layerId, rateAttrs[f], 1 / ratio, true);
+                }
+            }
+
+            // Pre-Comp: its contents retime themselves, but where it starts in this Composition
+            // is counted in this Composition's frames. Same mechanism as footage below.
+            if (layerType === "compositionReference") {
+                try {
+                    var refOffset = api.get(layerId, "timeOffset");
+                    var refDelta = Math.round(refOffset * ratio) - refOffset;
+                    if (refDelta !== 0) {
+                        offsetLayerTimeKeepKeys(layerId, refDelta);
+                        console.log("  - " + layerId + " Pre-Comp offset: " + refOffset + " → " + Math.round(refOffset * ratio));
+                    }
+                } catch (e) {
+                    console.log("  - Error retiming Pre-Comp " + layerId + ": " + e.message);
                 }
             }
 
@@ -552,7 +737,7 @@ function convertFrameRate(targetFps) {
                     var timeOffset = api.get(layerId, "timeOffset");
                     var offsetDelta = Math.round(timeOffset * ratio) - timeOffset;
                     if (offsetDelta !== 0) {
-                        api.offsetLayerTime(layerId, offsetDelta);
+                        offsetLayerTimeKeepKeys(layerId, offsetDelta);
                         console.log("  - " + layerId + " footage offset: " + timeOffset + " → " + Math.round(timeOffset * ratio));
                     }
 
@@ -573,7 +758,7 @@ function convertFrameRate(targetFps) {
                 try {
                     var interpMode = api.get(layerId, "mode");
                     if (interpMode === 0) {
-                        scaleFrameAttribute(layerId, "value", 1 / ratio);
+                        scaleFrameAttribute(layerId, "value", 1 / ratio, true);
                         scaleFrameAttribute(layerId, "offset", ratio);
                         scaleFrameAttribute(layerId, "startFrame", ratio);
                         scaleFrameAttribute(layerId, "cycleLength", ratio);
@@ -658,6 +843,8 @@ function convertFrameRate(targetFps) {
         } catch(e) {
             console.log("Could not restore playhead position");
         }
+
+        return { from: fromFps, to: targetFps, keys: totalKeyframes, checks: layersToCheck };
         
     } catch (e) {
         // Conversion error - still try to restore playhead if possible
@@ -666,6 +853,8 @@ function convertFrameRate(targetFps) {
         } catch(e2) {
             // Could not restore playhead
         }
+        console.error("Convert Frame Rate: " + (e && e.stack || e));
+        return "Failed: " + (e && e.message || e);
     }
 }
 

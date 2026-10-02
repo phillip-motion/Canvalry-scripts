@@ -1,6 +1,10 @@
 // Find and Replace Text Plugin for Cavalry
 // Searches through all text layers and composition overrides with regex and case sensitivity support
 
+import { tokens, span, label, section, status, button, field, formRow, checkRow, list, row, panel } from "./lib/ui-kit.js";
+
+var T = tokens();
+
 ui.setTitle("Find and Replace Text");
 
 // ============================================
@@ -244,22 +248,17 @@ var caseSensitiveCheckbox = new ui.Checkbox(false);
 var useRegexCheckbox = new ui.Checkbox(false);
 
 // Buttons
-var findButton = new ui.Button("Find All");
+var findButton = button("Find All", false, T);
 findButton.setToolTip("Search all text layers and overrides");
 
-var replaceAllButton = new ui.Button("Replace All");
+var replaceAllButton = button("Replace All", true, T);
 replaceAllButton.setToolTip("Replace all matches across the project");
 
 // Results display
-var resultsScrollView = new ui.ScrollView();
-resultsScrollView.setFixedHeight(200);
-
-var resultsContainer;
-var resultsColumn;
+var results = list(200, T);
 
 // Status label
-var statusLabel = new ui.Label("Enter search text and click 'Find All'");
-statusLabel.setTextColor(ui.getThemeColor("Light"));
+var statusLabel = status("Enter search text and click 'Find All'", T);
 
 // Store current matches for replace operation
 var currentMatches = [];
@@ -270,71 +269,56 @@ var currentSearchPattern = null;
 // ============================================
 
 function clearResultsTable() {
-    resultsColumn = new ui.VLayout();
-    resultsColumn.setSpaceBetween(4);
-    
-    resultsContainer = new ui.VLayout();
-    resultsContainer.setSpaceBetween(0);
-    resultsContainer.add(resultsColumn);
-    
-    resultsScrollView.setLayout(resultsContainer);
+    results.layout.clear();
 }
 
+/**
+ * A snippet of the text around the first match, as rich text with every match
+ * picked out in the accent.
+ */
 function highlightMatches(text, pattern) {
-    // For display purposes, show context around matches
-    // Since we can't use HTML formatting, we'll show the full text with match indicators
     pattern.lastIndex = 0;
-    var matches = text.match(pattern);
-    if (matches && matches.length > 0) {
-        // Truncate long text but show matches
-        if (text.length > 80) {
-            // Find first match position
-            pattern.lastIndex = 0;
-            var firstMatchIndex = text.search(pattern);
-            var start = Math.max(0, firstMatchIndex - 20);
-            var end = Math.min(text.length, firstMatchIndex + 60);
-            var snippet = (start > 0 ? "..." : "") + text.substring(start, end) + (end < text.length ? "..." : "");
-            return snippet;
-        }
-        return text;
+    var first = text.search(pattern);
+    var start = 0;
+    var end = text.length;
+    if (text.length > 80 && first !== -1) {
+        start = Math.max(0, first - 20);
+        end = Math.min(text.length, first + 60);
     }
-    return text;
+    var snippet = text.substring(start, end);
+
+    var html = start > 0 ? span("…", { color: T.muted }) : "";
+    var last = 0;
+    var m;
+    pattern.lastIndex = 0;
+    while ((m = pattern.exec(snippet)) !== null) {
+        if (m[0].length === 0) { pattern.lastIndex++; continue; }
+        html += span(snippet.substring(last, m.index), { color: T.text });
+        html += span(m[0], { color: T.accent, "font-weight": 600 });
+        last = m.index + m[0].length;
+    }
+    html += span(snippet.substring(last), { color: T.text });
+    if (end < text.length) html += span("…", { color: T.muted });
+    pattern.lastIndex = 0;
+    return html;
 }
 
 function populateResults(matches, pattern) {
     clearResultsTable();
-    
+
     if (matches.length === 0) {
-        var noResultsLabel = new ui.Label("No matches found");
-        noResultsLabel.setTextColor(ui.getThemeColor("Light"));
-        resultsColumn.add(noResultsLabel);
+        results.layout.add(label("No matches found", 11, T.muted));
+        results.layout.addStretch();
         return;
     }
-    
+
     for (var i = 0; i < matches.length; i++) {
         var match = matches[i];
-        
-        // Location row
-        var locationLabel = new ui.Label(match.entry.displayName);
-        locationLabel.setTextColor(ui.getThemeColor("Accent1"));
-        resultsColumn.add(locationLabel);
-        
-        // Text preview row
-        var previewText = highlightMatches(match.entry.text, pattern);
-        var textLabel = new ui.Label("  \"" + previewText + "\"");
-        textLabel.setTextColor(ui.getThemeColor("Text"));
-        resultsColumn.add(textLabel);
-        
-        // Match count
-        var countLabel = new ui.Label("  " + match.matchCount + " match" + (match.matchCount > 1 ? "es" : ""));
-        countLabel.setTextColor(ui.getThemeColor("Midlight"));
-        resultsColumn.add(countLabel);
-        
-        // Add separator spacing
-        if (i < matches.length - 1) {
-            resultsColumn.addSpacing(8);
-        }
+        var title = span(match.entry.displayName, { color: T.text, "font-weight": 500 }) +
+            span("  " + match.matchCount + " match" + (match.matchCount > 1 ? "es" : ""), { color: T.muted, "font-size": "10px" });
+        results.layout.add(row(title, null, T, { detailHtml: highlightMatches(match.entry.text, pattern), tip: match.entry.text }));
     }
+    results.layout.addStretch();
 }
 
 // ============================================
@@ -346,7 +330,7 @@ function performFind() {
     
     if (!searchText || searchText.trim() === "") {
         statusLabel.setText("Please enter search text");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         clearResultsTable();
         currentMatches = [];
         currentSearchPattern = null;
@@ -361,7 +345,7 @@ function performFind() {
     
     if (!pattern) {
         statusLabel.setText("Invalid regex pattern");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         clearResultsTable();
         currentMatches = [];
         currentSearchPattern = null;
@@ -369,14 +353,14 @@ function performFind() {
     }
     
     statusLabel.setText("Searching...");
-    statusLabel.setTextColor(ui.getThemeColor("Light"));
+    statusLabel.setTextColor(T.muted);
     
     // Get all text entries
     var allTextEntries = getAllTextFromProject();
     
     if (allTextEntries.length === 0) {
         statusLabel.setText("No text layers found in project");
-        statusLabel.setTextColor(ui.getThemeColor("Light"));
+        statusLabel.setTextColor(T.muted);
         clearResultsTable();
         currentMatches = [];
         currentSearchPattern = null;
@@ -401,10 +385,10 @@ function performFind() {
     
     if (matches.length === 0) {
         statusLabel.setText("No matches found (searched " + allTextEntries.length + " text entries)");
-        statusLabel.setTextColor(ui.getThemeColor("Light"));
+        statusLabel.setTextColor(T.muted);
     } else {
         statusLabel.setText("Found " + totalMatchCount + " match" + (totalMatchCount > 1 ? "es" : "") + " in " + matches.length + " text layer" + (matches.length > 1 ? "s" : ""));
-        statusLabel.setTextColor(ui.getThemeColor("Accent1"));
+        statusLabel.setTextColor(T.accent);
     }
 }
 
@@ -414,7 +398,7 @@ function performReplaceAll() {
     
     if (!searchText || searchText.trim() === "") {
         statusLabel.setText("Please enter search text");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         return;
     }
     
@@ -426,12 +410,12 @@ function performReplaceAll() {
     
     if (!pattern) {
         statusLabel.setText("Invalid regex pattern");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         return;
     }
     
     statusLabel.setText("Replacing...");
-    statusLabel.setTextColor(ui.getThemeColor("Light"));
+    statusLabel.setTextColor(T.muted);
     
     // Get all text entries
     var allTextEntries = getAllTextFromProject();
@@ -439,7 +423,7 @@ function performReplaceAll() {
     
     if (matches.length === 0) {
         statusLabel.setText("No matches found to replace");
-        statusLabel.setTextColor(ui.getThemeColor("Light"));
+        statusLabel.setTextColor(T.muted);
         return;
     }
     
@@ -478,7 +462,7 @@ function performReplaceAll() {
         statusMsg += " (" + failCount + " failed)";
     }
     statusLabel.setText(statusMsg);
-    statusLabel.setTextColor(ui.getThemeColor("Accent1"));
+    statusLabel.setTextColor(T.accent);
     
     // Clear results since text has changed
     clearResultsTable();
@@ -492,73 +476,25 @@ function performReplaceAll() {
 // UI LAYOUT
 // ============================================
 
-var mainLayout = new ui.VLayout();
-mainLayout.setMargins(10, 10, 10, 10);
-mainLayout.setSpaceBetween(8);
+var mainLayout = panel();
+mainLayout.add(formRow("Find", field(findInput, T), T, 55));
+mainLayout.add(formRow("Replace", field(replaceInput, T), T, 55));
 
-// Find row
-var findLabel = new ui.Label("Find");
-findLabel.setTextColor(ui.getThemeColor("Light"));
-findLabel.setMinimumWidth(55);
-
-var findRow = new ui.HLayout();
-findRow.add(findLabel);
-findRow.add(findInput);
-mainLayout.add(findRow);
-
-// Replace row
-var replaceLabel = new ui.Label("Replace");
-replaceLabel.setTextColor(ui.getThemeColor("Light"));
-replaceLabel.setMinimumWidth(55);
-
-var replaceRow = new ui.HLayout();
-replaceRow.add(replaceLabel);
-replaceRow.add(replaceInput);
-mainLayout.add(replaceRow);
-
-// Options row
 var optionsRow = new ui.HLayout();
 optionsRow.setSpaceBetween(16);
-
-var caseSensitiveLabel = new ui.Label("Case sensitive");
-caseSensitiveLabel.setTextColor(ui.getThemeColor("Light"));
-var caseRow = new ui.HLayout();
-caseRow.setSpaceBetween(4);
-caseRow.add(caseSensitiveCheckbox);
-caseRow.add(caseSensitiveLabel);
-
-var regexLabel = new ui.Label("Use regex");
-regexLabel.setTextColor(ui.getThemeColor("Light"));
-var regexRow = new ui.HLayout();
-regexRow.setSpaceBetween(4);
-regexRow.add(useRegexCheckbox);
-regexRow.add(regexLabel);
-
-optionsRow.add(caseRow);
-optionsRow.add(regexRow);
-optionsRow.addStretch();
+optionsRow.add(checkRow(caseSensitiveCheckbox, "Case sensitive", T));
+optionsRow.add(checkRow(useRegexCheckbox, "Use regex", T));
 mainLayout.add(optionsRow);
 
-// Buttons row
 var buttonsRow = new ui.HLayout();
-buttonsRow.setSpaceBetween(8);
+buttonsRow.setSpaceBetween(6);
 buttonsRow.add(findButton);
 buttonsRow.add(replaceAllButton);
 mainLayout.add(buttonsRow);
 
-// Results section
-mainLayout.addSpacing(4);
-
-var resultsLabel = new ui.Label("Results");
-resultsLabel.setTextColor(ui.getThemeColor("Light"));
-mainLayout.add(resultsLabel);
-
-mainLayout.add(resultsScrollView);
-
-// Status
-mainLayout.addSpacing(4);
+mainLayout.add(section("Results", T));
+mainLayout.add(results.widget);
 mainLayout.add(statusLabel);
-
 mainLayout.addStretch();
 
 // ============================================

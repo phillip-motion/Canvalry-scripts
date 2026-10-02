@@ -2,6 +2,10 @@
 // Moves file assets from outside the Project Assets folder into it,
 // optionally categorising into Audio, Footage, Fonts, Images, and Quiver subfolders.
 
+import { tokens, span, label, section, status, button, checkRow, list, row, panel } from "./lib/ui-kit.js";
+
+var T = tokens();
+
 ui.setTitle("Consolidate Assets");
 
 // =============================================================================
@@ -12,19 +16,17 @@ var categorizeCheckbox = new ui.Checkbox(true);
 var sceneSubfolderCheckbox = new ui.Checkbox(false);
 var excludeRefsCheckbox = new ui.Checkbox(true);
 
-var scanButton = new ui.Button("Refresh");
-var consolidateButton = new ui.Button("Consolidate");
+var scanButton = button("Refresh", false, T);
+var consolidateButton = button("Consolidate", true, T);
 
-var selectAllButton = new ui.Button("All");
-var selectNoneButton = new ui.Button("None");
+var selectAllButton = button("All", false, T);
+var selectNoneButton = button("None", false, T);
+selectAllButton.setFixedHeight(20);
+selectNoneButton.setFixedHeight(20);
 
-var statusLabel = new ui.Label("");
-statusLabel.setTextColor(ui.getThemeColor("Accent1"));
+var statusLabel = status("", T);
 
-var previewScrollView = new ui.ScrollView();
-previewScrollView.setFixedHeight(260);
-
-var rowsContainer;
+var preview = list(260, T);
 
 // Tracks the last scan result so Consolidate can act on it
 var lastScanResult = [];
@@ -139,7 +141,6 @@ function updateTitle() {
         lastScanResult.length + " external asset" + (lastScanResult.length !== 1 ? "s" : "") +
         " found, " + checked + " selected"
     );
-    previewTitleLabel.setTextColor("#ffffff");
 }
 
 // =============================================================================
@@ -151,7 +152,7 @@ function scanExternalAssets() {
     try { assetsPath = api.getAssetPath(); } catch (e) {}
     if (!assetsPath || assetsPath === "") {
         statusLabel.setText("No Project set. Set a Project first via File > Project Settings.");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         lastScanResult = [];
         return [];
     }
@@ -208,9 +209,7 @@ function scanExternalAssets() {
 
 function clearPreviewTable() {
     rowCheckboxes = [];
-    rowsContainer = new ui.VLayout();
-    rowsContainer.setSpaceBetween(2);
-    previewScrollView.setLayout(rowsContainer);
+    preview.layout.clear();
 }
 
 function updatePreview(results) {
@@ -219,28 +218,16 @@ function updatePreview(results) {
 
     for (var i = 0; i < results.length; i++) {
         var r = results[i];
-        var row = new ui.HLayout();
-        row.setSpaceBetween(6);
 
         var cb = new ui.Checkbox(true);
         cb.onValueChanged = function () { updateTitle(); };
         rowCheckboxes.push(cb);
-        row.add(cb);
 
         var displayName = r.name.length > 45 ? r.name.substring(0, 42) + "..." : r.name;
-        var nameLabel = new ui.Label(displayName.split(" ").join("\u00A0"));
-        nameLabel.setTextColor(ui.getThemeColor("Text"));
-        row.add(nameLabel);
-
-        row.addStretch();
-
-        var typeLabel = new ui.Label(r.type);
-        typeLabel.setTextColor(ui.getThemeColor("Midlight"));
-        row.add(typeLabel);
-
-        rowsContainer.add(row);
+        var title = span(displayName, { color: T.text }) + span("  " + r.type, { color: T.muted, "font-size": "10px" });
+        preview.layout.add(row(title, null, T, { lead: cb, tip: r.name }));
     }
-    rowsContainer.addStretch();
+    preview.layout.addStretch();
 }
 
 // =============================================================================
@@ -252,13 +239,13 @@ function doConsolidate() {
     try { assetsPath = api.getAssetPath(); } catch (e) {}
     if (!assetsPath || assetsPath === "") {
         statusLabel.setText("No Project set. Set a Project first via File > Project Settings.");
-        statusLabel.setTextColor("#ff6666");
+        statusLabel.setTextColor(T.error);
         return;
     }
 
     if (lastScanResult.length === 0 || checkedCount() === 0) {
         statusLabel.setText("Nothing to consolidate. Scan and select assets first.");
-        statusLabel.setTextColor(ui.getThemeColor("Light"));
+        statusLabel.setTextColor(T.muted);
         return;
     }
 
@@ -322,7 +309,7 @@ function doConsolidate() {
         msg += " " + failed + " failed (see Console).";
     }
     statusLabel.setText(msg);
-    statusLabel.setTextColor(failed > 0 ? "#ff6666" : ui.getThemeColor("Accent1"));
+    statusLabel.setTextColor(failed > 0 ? T.error : T.accent);
     console.log(msg);
 
     lastScanResult = [];
@@ -333,53 +320,28 @@ function doConsolidate() {
 // LAYOUT
 // =============================================================================
 
-var margin = 2;
-var spacing = 6;
+var mainLayout = panel();
 
-var mainLayout = new ui.VLayout();
-mainLayout.setMargins(margin, margin, margin, margin);
-mainLayout.setSpaceBetween(spacing);
+var options = new ui.VLayout();
+options.setSpaceBetween(4);
+options.add(checkRow(categorizeCheckbox, "Categorize by type", T));
+options.add(checkRow(sceneSubfolderCheckbox, "Group assets in scene subfolder", T));
+options.add(checkRow(excludeRefsCheckbox, "Exclude reference comps (.cv/.cvc)", T));
+mainLayout.add(options);
 
-// Options row
-var categorizeLabel = new ui.Label("Categorize by type");
-categorizeLabel.setTextColor(ui.getThemeColor("Light"));
-var categorizeRow = new ui.HLayout();
-categorizeRow.add(categorizeCheckbox);
-categorizeRow.add(categorizeLabel);
-categorizeRow.addStretch();
-mainLayout.add(categorizeRow);
-
-var sceneSubfolderLabel = new ui.Label("Group assets in scene subfolder");
-sceneSubfolderLabel.setTextColor(ui.getThemeColor("Light"));
-var sceneSubfolderRow = new ui.HLayout();
-sceneSubfolderRow.add(sceneSubfolderCheckbox);
-sceneSubfolderRow.add(sceneSubfolderLabel);
-mainLayout.add(sceneSubfolderRow);
-
-var excludeRefsLabel = new ui.Label("Exclude reference comps (.cv/.cvc)");
-excludeRefsLabel.setTextColor(ui.getThemeColor("Light"));
-var excludeRefsRow = new ui.HLayout();
-excludeRefsRow.add(excludeRefsCheckbox);
-excludeRefsRow.add(excludeRefsLabel);
-mainLayout.add(excludeRefsRow);
-
-mainLayout.addSpacing(2);
-
-// Preview header
 var previewHeaderRow = new ui.HLayout();
-var previewTitleLabel = new ui.Label("Select");
-previewTitleLabel.setTextColor(ui.getThemeColor("Light"));
-previewHeaderRow.add(previewTitleLabel);
+previewHeaderRow.setSpaceBetween(4);
+previewHeaderRow.add(section("Select", T));
 previewHeaderRow.addStretch();
 previewHeaderRow.add(selectAllButton);
 previewHeaderRow.add(selectNoneButton);
 mainLayout.add(previewHeaderRow);
 
-mainLayout.add(previewScrollView);
+mainLayout.add(preview.widget);
 mainLayout.add(statusLabel);
-mainLayout.addSpacing(2);
 
 var consolidateRow = new ui.HLayout();
+consolidateRow.setSpaceBetween(6);
 consolidateRow.add(scanButton);
 consolidateRow.add(consolidateButton);
 mainLayout.add(consolidateRow);
@@ -400,7 +362,7 @@ function runScan() {
     updatePreview(results);
     if (results.length === 0 && !hadError) {
         statusLabel.setText("All assets are already inside the Project Assets folder.");
-        statusLabel.setTextColor(ui.getThemeColor("Accent1"));
+        statusLabel.setTextColor(T.accent);
     } else if (results.length > 0) {
         updateTitle();
     }
@@ -441,7 +403,6 @@ consolidateButton.onClick = function () { doConsolidate(); };
 // =============================================================================
 
 ui.add(mainLayout);
-ui.setBackgroundColor(ui.getThemeColor("Base"));
 ui.setMinimumWidth(380);
 ui.setMinimumHeight(440);
 ui.show();
