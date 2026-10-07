@@ -16,7 +16,7 @@
  *   node scripts/build.cjs --release # Production build (same as no args)
  */
 
-const { execSync, spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
