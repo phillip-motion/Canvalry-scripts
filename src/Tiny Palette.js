@@ -173,6 +173,17 @@ function makeAddTile() {
 
 // Right-click a chip → delete it. The chip sits in a Container because the
 // native ColorChip has no mouse callbacks of its own.
+// Colour the selected layers: fill if it's on, else stroke if that's on,
+// else leave the layer alone.
+function applyToSelection(hex) {
+    (api.getSelection() || []).forEach(function (id) {
+        try {
+            if (api.hasFill(id)) api.set(id, { "material.materialColor": hex });
+            else if (api.hasStroke(id)) api.set(id, { "stroke.strokeColor": hex });
+        } catch (e) { /* not a shape */ }
+    });
+}
+
 function wrapChip(chip, index) {
     var row = new ui.HLayout();
     row.setMargins(0, 0, 0, 0);
@@ -182,6 +193,7 @@ function wrapChip(chip, index) {
     box.setFixedHeight(CHIP);
     box.setLayout(row);
     box.onMousePress = function (pos, button) {
+        if (button === "left") { applyToSelection(chip.getColor()); return; }
         if (button !== "right") return;
         ui.clearContextMenu();
         ui.addMenuItem({
@@ -213,6 +225,7 @@ function rebuildChips() {
                 chip.onValueChanged = function () {
                     if (suppressWrites) return;
                     writeBack(currentPreset());
+                    applyToSelection(chip.getColor());   // follow edits made in the popup
                 };
                 chipFlow.add(wrapChip(chip, idx));
                 chips.push(chip);
