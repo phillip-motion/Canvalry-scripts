@@ -1,23 +1,25 @@
-// v4.0 — compact: no min size, native + Array / ↻ Array button beside the dropdown
+// v4.1 — ⋯ palette menu (Color window actions + Sync Array) replaces the Array button
 // Tiny Palette — really simple.
 //
-//   [ preset dropdown     ][+ Array] ← your presets, then "Add palette…" (name popup).
-//                                      + Array creates a colorArray; once this comp
-//                                      has one it reads ↻ Array and syncs it.
+//   [ preset dropdown        ][⋯]   ← your presets, then "Add palette…" (name popup).
+//                                      ⋯ = the Color window's palette menu, plus
+//                                      Sync Array when this comp has the preset's array.
 //                                      Presets reload on dropdown hover if changed.
 //   [chip][chip][chip][+]            ← the colours, wrapping. Double-click → wheel,
 //                                      right-click → delete, [+] adds a colour.
 //
-// Editing writes back by rebuilding the .pal via api.createPalette(overwrite).
-// Presets are stamped metadata.author = "Palette Panel"; factory palettes
-// (Alice, Bright, Canva Color…) stay hidden.
+// Lists every palette in the library and project palette folders. Editing
+// writes back by rebuilding the .pal via api.createPalette(overwrite), keeping
+// the palette's own author and website.
 
 ui.setTitle("Tiny Palette");
+// Toolbar = no docking tab. Height isn't fixed, so the chips can still wrap.
+ui.setToolbar();
 var MARGIN = 4;
-ui.setMargins(MARGIN, MARGIN, MARGIN, MARGIN);
+ui.setMargins(MARGIN, 0, MARGIN, 0);   // sides only; stretches handle vertical space
+ui.setSpaceBetween(MARGIN);
+var ROW = 22;   // dropdown / ⋯ height
 
-// ponytail: author tag keeps its old name so existing presets stay visible.
-var OWNED_AUTHOR = "Palette Panel";
 var DEFAULT_NAME = "My Colours";
 var DEFAULT_SEED = ["#4a90d9", "#50c878", "#f5a623"];
 
@@ -33,23 +35,16 @@ function currentPreset() {
 
 // ---------- palette IO ----------
 
-function listMyPresets() {
+function listPresets() {
     var all = api.listPalettes("all") || [];
     all.sort(function (a, b) { return a.name.localeCompare(b.name); });
-    var out = [];
-    for (var i = 0; i < all.length; i++) {
-        var pal = api.getPalette(all[i].name, all[i].scope);
-        if (pal && pal.author === OWNED_AUTHOR) {
-            out.push({ name: all[i].name, scope: all[i].scope, path: all[i].path });
-        }
-    }
-    return out;
+    return all.map(function (a) { return { name: a.name, scope: a.scope, path: a.path }; });
 }
 
 function ensureDefaultPreset() {
-    if (listMyPresets().length > 0) return;
+    if (listPresets().length > 0) return;
     try {
-        api.createPalette(DEFAULT_NAME, "library", DEFAULT_SEED, { author: OWNED_AUTHOR });
+        api.createPalette(DEFAULT_NAME, "library", DEFAULT_SEED);
         console.log("Tiny Palette: created starter preset '" + DEFAULT_NAME + "'");
     } catch (e) {
         console.error("Tiny Palette: could not create starter preset — " + e);
@@ -79,7 +74,7 @@ function writeBack(p) {
     }
     try {
         api.createPalette(p.name, p.scope, swatches, {
-            author: OWNED_AUTHOR,
+            author: pal.author || "",
             website: pal.website || "",
             overwrite: true,
         });
@@ -96,7 +91,7 @@ function writeBack(p) {
 // lives in a Container whose fixed height is re-measured for the current width
 // (on rebuild and on resize). A Container ignores a second setLayout, so the
 // host keeps one slot layout and each rebuild swaps a fresh Container into it.
-var CHIP = 24, GAP = 4;
+var CHIP = 22, GAP = 4;
 var chipHost = new ui.Container();
 var chipSlot = new ui.VLayout();
 chipSlot.setMargins(0, 0, 0, 0);
@@ -111,13 +106,17 @@ function fitChips() {
 }
 
 var presetDropdown = new ui.DropDown();
+presetDropdown.setFixedHeight(ROW);
 var lastIndex = 0;     // last real preset index, restored after "Add palette…"
 
 function setStatus(text) {
     if (text) console.log("Tiny Palette: " + text);
 }
 
-var arrayButton = new ui.Button("+ Array");
+var menuButton = new ui.Button("⋯");
+menuButton.setFixedWidth(ROW);
+menuButton.setFixedHeight(ROW);
+menuButton.setToolTip("Palette options");
 
 // Outlined "+" tile, same size as a chip, always last in the flow. Drawn on a
 // canvas because Container.setBorder ignores the corner radius.
@@ -238,7 +237,7 @@ function fingerprint(list) {
 function refreshPresets(keepName) {
     var prev = keepName || (currentPreset() && currentPreset().name);
     ensureDefaultPreset();
-    presets = listMyPresets();
+    presets = listPresets();
     lastFingerprint = fingerprint(presets);
     presetDropdown.clear();
     for (var i = 0; i < presets.length; i++) {
@@ -256,7 +255,6 @@ function refreshPresets(keepName) {
     if (presets.length > 0) presetDropdown.setValue(idx);
     lastIndex = idx;
     rebuildChips();
-    updateArrayButton();
 }
 
 function addColour() {
@@ -298,7 +296,7 @@ function createPalette() {
     var unique = name, n = 2;
     while (taken[unique.toLowerCase()]) { unique = name + " " + n; n++; }
     try {
-        api.createPalette(unique, "library", DEFAULT_SEED, { author: OWNED_AUTHOR });
+        api.createPalette(unique, "library", DEFAULT_SEED);
         refreshPresets(unique);
         setStatus("Created '" + unique + "'");
     } catch (e) {
@@ -315,12 +313,11 @@ presetDropdown.onValueChanged = function () {
     }
     lastIndex = presetDropdown.getValue();
     rebuildChips();
-    updateArrayButton();
 };
 
 // ---------- colorArray link ----------
 // Arrays made here are tagged with user data naming their preset, so the
-// button can find "this preset's array" in the active comp.
+// menu can offer "Sync Array" for this preset's array in the active comp.
 var ARRAY_KEY = "tinyPalette";
 
 function findArray(p) {
@@ -330,16 +327,6 @@ function findArray(p) {
         if (api.hasUserDataKey(ids[i], ARRAY_KEY) && api.getUserDataKey(ids[i], ARRAY_KEY) === p.name) return ids[i];
     }
     return null;
-}
-
-function updateArrayButton() {
-    if (findArray(currentPreset())) {
-        arrayButton.setText("↻ Array");
-        arrayButton.setToolTip("Update this comp's colorArray to match the preset");
-    } else {
-        arrayButton.setText("+ Array");
-        arrayButton.setToolTip("Create a colorArray layer from this preset");
-    }
 }
 
 // Rewrite the array's colours in place, so its connections survive.
@@ -353,37 +340,155 @@ function syncArray(id, p) {
     api.set(id, values);
 }
 
-arrayButton.onClick = function () {
-    var p = currentPreset();
-    if (!p) return;
-    var existing = findArray(p);
-    if (existing) {
-        try {
-            syncArray(existing, p);
-            setStatus("Synced colorArray with '" + p.name + "'");
-        } catch (e) {
-            console.error("Tiny Palette: could not sync colorArray — " + e);
-        }
-        return;
-    }
+function createArray(p) {
     var id = api.createColorArrayFromPalette(p.name, p.scope);
-    if (id) {
-        api.setUserData(id, ARRAY_KEY, p.name);
-        api.rename(id, p.name);
-        api.select([id]);
-        setStatus("colorArray created from '" + p.name + "'");
-    } else {
-        setStatus("Could not create colorArray");
-    }
-    updateArrayButton();
-};
-
-// Re-check when the comp changes or a layer goes (e.g. the array is deleted).
-function Callbacks() {
-    this.onCompChanged = updateArrayButton;
-    this.onLayerRemoved = updateArrayButton;
+    if (!id) { setStatus("Could not create colorArray"); return; }
+    api.setUserData(id, ARRAY_KEY, p.name);
+    api.rename(id, p.name);
+    api.select([id]);
+    setStatus("colorArray created from '" + p.name + "'");
 }
-ui.addCallbackObject(new Callbacks());
+
+// ---------- ⋯ menu ----------
+// Mirrors the Color window's palette menu, using Cavalry's own icons.
+
+var ICONS = api.getAppAssetsPath() + "/icons/";
+
+function toHex(c) {
+    if (typeof c === "string") return c;
+    return "#" + [c.r, c.g, c.b].map(function (v) { return (v < 16 ? "0" : "") + v.toString(16); }).join("");
+}
+
+// Swatches as createPalette input, keeping names.
+function swatchObjects(p) {
+    return readSwatches(p).map(function (s) { return { color: s.hex, name: s.name }; });
+}
+
+// Selected attributes as [{layer, attr}]. The return shape isn't documented,
+// so accept both "layerId.attrId" strings and {layerId: [attrIds]}.
+function selectedAttributes() {
+    var sel = api.getSelectedAttributes() || [], out = [];
+    if (Array.isArray(sel)) {
+        sel.forEach(function (path) {
+            var dot = String(path).indexOf(".");
+            if (dot > 0) out.push({ layer: path.slice(0, dot), attr: path.slice(dot + 1) });
+        });
+    } else {
+        Object.keys(sel).forEach(function (layer) {
+            [].concat(sel[layer]).forEach(function (attr) { out.push({ layer: layer, attr: attr }); });
+        });
+    }
+    return out;
+}
+
+function importPalette() {
+    var file = ui.chooseFileToOpen("", "Palettes (*.pal *.ase *.theme)");
+    if (!file) return;
+    try {
+        api.importPalette(file, "library");
+        refreshPresets(api.getFileNameFromPath(file, false));
+        setStatus("Imported '" + api.getFileNameFromPath(file, true) + "'");
+    } catch (e) { console.error("Tiny Palette: could not import — " + e); }
+}
+
+function saveAs(p) {
+    var ext = api.getExtensionFromPath(p.path).replace(/^\./, "");
+    var file = ui.chooseFileToSave("", "Palette (*." + ext + ")");
+    if (!file) return;
+    // ponytail: text copy; fine for .pal, binary .ase would need encodeBinary.
+    if (api.writeToFile(file, api.readFromFile(p.path), true)) setStatus("Saved a copy to " + file);
+    else console.error("Tiny Palette: could not save to " + file);
+}
+
+// No rename API: write the palette under the new name, delete the old one,
+// and move any colorArray tags over so ↻ Sync keeps working.
+function renamePalette(p) {
+    var name = (new ui.Modal().showStringInput("Rename palette", "Name", p.name) || "").trim();
+    if (!name || name === p.name) return;
+    var pal = api.getPalette(p.name, p.scope);
+    try {
+        api.createPalette(name, p.scope, swatchObjects(p), { author: pal.author || "", website: pal.website || "" });
+        api.deletePalette(p.name, p.scope);
+        var arr = findArray(p);
+        if (arr) { api.setUserData(arr, ARRAY_KEY, name); api.rename(arr, name); }
+        refreshPresets(name);
+        setStatus("Renamed to '" + name + "'");
+    } catch (e) { console.error("Tiny Palette: could not rename — " + e); }
+}
+
+function addColoursFromSelection(p) {
+    var seen = {};
+    readSwatches(p).forEach(function (s) { seen[s.hex.toLowerCase()] = true; });
+    var added = 0;
+    (api.getSelection() || []).forEach(function (id) {
+        try {
+            var hex = toHex(api.get(id, "material.materialColor")).toLowerCase();
+            if (!seen[hex]) { api.addSwatchToPalette(p.name, hex, undefined, p.scope); seen[hex] = true; added++; }
+        } catch (e) { /* layer has no fill */ }
+    });
+    rebuildChips();
+    setStatus(added ? "Added " + added + " colour(s) from selection" : "No new colours in selection");
+}
+
+function setGradient(p) {
+    var done = 0;
+    selectedAttributes().forEach(function (a) {
+        try { if (api.setGradientFromPalette(a.layer, a.attr, p.name, p.scope)) done++; } catch (e) {}
+    });
+    setStatus(done ? "Set " + done + " gradient(s) from '" + p.name + "'" : "Select a gradient attribute first");
+}
+
+function clearPalette(p) {
+    if (!new ui.Modal().showConfirmation("Clear palette", "Remove every colour from '" + p.name + "'?")) return;
+    try {
+        for (var i = readSwatches(p).length - 1; i >= 0; i--) api.removeSwatchFromPalette(p.name, i, p.scope);
+        rebuildChips();
+        setStatus("Cleared '" + p.name + "'");
+    } catch (e) { console.error("Tiny Palette: could not clear — " + e); }
+}
+
+function deletePalette(p) {
+    if (!new ui.Modal().showConfirmation("Delete palette", "Delete '" + p.name + "'? This can't be undone.")) return;
+    if (api.deletePalette(p.name, p.scope)) { refreshPresets(); setStatus("Deleted '" + p.name + "'"); }
+    else console.error("Tiny Palette: could not delete '" + p.name + "'");
+}
+
+function showPaletteMenu() {
+    var p = currentPreset();
+    var has = !!p;
+    var arr = has ? findArray(p) : null;
+    function item(name, icon, fn, enabled) {
+        ui.addMenuItem({ name: name, icon: ICONS + icon, enabled: enabled !== false,
+            onMouseRelease: function () { fn(p); } });
+    }
+    function sep() { ui.addMenuItem({ name: "" }); }
+
+    ui.clearContextMenu();
+    item("New Palette…", "newPalette.png", createPalette);
+    sep();
+    item("Import…", "importPalette.png", importPalette);
+    item("Save As…", "save.png", saveAs, has);
+    sep();
+    item("Rename Palette…", "context-menus/rename.png", renamePalette, has);
+    sep();
+    item("Add Colors from Selection", "addColorsFromSelection.png", addColoursFromSelection,
+        has && (api.getSelection() || []).length > 0);
+    sep();
+    item("Set Gradient From Palette", "setGradientFromPalette.png", setGradient, has && selectedAttributes().length > 0);
+    item("Create Array From Palette", "createArrayFromPalette.png", createArray, has);
+    if (arr) {
+        item("Sync Array", "context-menus/reload.png", function (p) {
+            try { syncArray(arr, p); setStatus("Synced colorArray with '" + p.name + "'"); }
+            catch (e) { console.error("Tiny Palette: could not sync colorArray — " + e); }
+        });
+    }
+    sep();
+    item("Clear Palette", "palette_clearPalette.png", clearPalette, has);
+    item("Delete Palette", "bin.png", deletePalette, has);
+    ui.showContextMenu();
+}
+
+menuButton.onClick = showPaletteMenu;
 
 // ---------- layout ----------
 
@@ -397,13 +502,15 @@ var dropdownHost = new ui.Container();
 dropdownHost.setLayout(dropdownRow);
 dropdownHost.useHoverEvents(true);
 dropdownHost.onMouseEnter = function () {
-    if (fingerprint(listMyPresets()) !== lastFingerprint) refreshPresets();
+    if (fingerprint(listPresets()) !== lastFingerprint) refreshPresets();
 };
 var topRow = new ui.HLayout();
 topRow.setMargins(0, 0, 0, 0);
 topRow.add(dropdownHost);
-topRow.add(arrayButton);
+topRow.add(menuButton);
 
+// Stretch above and below centres the content in a taller toolbar.
+ui.addStretch();
 ui.add(topRow);
 ui.add(chipHost);
 ui.addStretch();
