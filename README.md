@@ -10,37 +10,33 @@ Copy the scripts to your Cavalry Scripts folder.
 
 # Utilities
 
-### [Convert Frame Rate →](https://github.com/phillip-motion/Canvalry-scripts/releases/latest/download/Convert.Frame.Rate.jsc)
-<img width="312" height="230" alt="Screenshot 2025-11-05 at 21 38 38" src="https://github.com/user-attachments/assets/f14bfb71-ad9c-47d2-af95-4946a854d09e" />
-
-<br />
-Converts frame rate while maintaining visual timing of animations and easing curves. Just enter a frame rate and hit Apply! 
-<br /><br />
-
-
-> [!IMPORTANT]
-> This will only modify comp duration, keyframe placement and layer timing. It will not modify any stagger, oscillator or similar procedural elements.
-
-<br />
-
-
 ### [Easey →](https://github.com/sammularczyk/easey)
 The missing speed graph for Cavalry.
 
 <br />
 
-### [Lottie Importer →](https://github.com/phillip-motion/Canvalry-scripts/releases/latest/download/Lottie.Importer.jsc)
-Very, very WIP lottie import script.
 
+### [Tiny Palette →](https://github.com/phillip-motion/Canvalry-scripts/releases/latest/download/Tiny.Palette.jsc)
+A tiny little colour toolbar.
+<br />
+
+### [Lottie Importer →](https://github.com/sammularczyk/cavalry-lottie-tools/releases/latest)
+Import Lottie files.
 <br />
 
 ### [CSS Gradient Converter →](https://github.com/phillip-motion/Canvalry-scripts/releases/latest/download/CSS.Gradient.Converter.jsc)
 Converts CSS gradient syntax (linear-gradient) to a Gradient Shader.
-
 <br />
 
 ### [Set All Image Shaders to Mipmaps →](https://github.com/phillip-motion/Canvalry-scripts/releases/latest/download/Set.All.Image.Shaders.To.Mipmaps.jsc)
 Sets all image shaders to mipmaps in the current composition. Clean up those crunchy edges.
+<br />
+
+### [Set Background Alpha to 0 →](https://github.com/phillip-motion/Canvalry-scripts/releases/latest/download/Set.Background.Alpha.to.0.jsc)
+Headless script that sets the background colour alpha for all selected comps to 0.
+
+### [Explode Shape Layers →](https://github.com/phillip-motion/Canvalry-scripts/releases/latest/download/Explode.Shape.Layers.jsc)
+Explodes all paths on a shape layer to seperate shape layers.
 
 <br />
 
@@ -71,6 +67,13 @@ Find and replace any string in any comp.
 <br />
 
 Makes renaming layers and project items simple. Find & replace, append and prepend, and number assets with ease.
+
+<br />
+
+### [Swap Comp Names →](https://github.com/phillip-motion/Canvalry-scripts/releases/latest/download/Swap.Comp.Names.jsc)
+<br />
+
+Headless script to swap the names of two selected comps.
 
 <br />
 

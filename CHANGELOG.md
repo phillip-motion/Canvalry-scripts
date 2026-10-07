@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.0] - 2026-08-31
+New:
+- **Tiny Palette**: all the features of the Color window, in a tinier format.
+- **Swap Comp Names**: swap the comp names of two selected comps.
+- **Explode Shape Layers**: explode all paths on a shape layer to seperate layers
+- **Set Background Alpha to 0**: sets the background alpha for all selected comps to 0
+- **Points to Nulls**: Control path points with nulls
+
+Updated:
+- Cleaner UI for all
+
+Removed:
+- **Lottie Importer**: moved to [sammularczyk/cavalry-lottie-tools](https://github.com/sammularczyk/cavalry-lottie-tools)
+
 ## [1.3.0] - 2026-08-31
 
 ### Added
